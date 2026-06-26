@@ -33,9 +33,10 @@ services:
       HOST: odoo-db
       USER: odoo
       PASSWORD: odoo
-    command: ["odoo", "-d", "odoo", "-i", "base,point_of_sale", "--without-demo=all", "--stop-after-init"]
+    command: ["odoo", "-d", "odoo", "--addons-path=/usr/lib/python3/dist-packages/odoo/addons,/mnt/extra-addons", "-i", "base,point_of_sale,product_sync_central_id", "--without-demo=all", "--stop-after-init"]
     volumes:
       - odoo-data:/var/lib/odoo
+      - ./odoo-addons:/mnt/extra-addons
     restart: "no"
     networks:
       - project-network
@@ -56,8 +57,10 @@ services:
       PASSWORD: odoo
     ports:
       - "8069:8069"
+    command: ["odoo", "--addons-path=/usr/lib/python3/dist-packages/odoo/addons,/mnt/extra-addons"]
     volumes:
       - odoo-data:/var/lib/odoo
+      - ./odoo-addons:/mnt/extra-addons
     networks:
       - project-network
 

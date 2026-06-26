@@ -35,6 +35,29 @@ class OdooReceiver:
         self.rabbitmq_connection = None
         self.rabbitmq_channel = None
         self.odoo_client = None
+        self._central_id_field_supported = None
+
+    def supports_central_id_field(self) -> bool:
+        """Check whether product.template.central_id is available in Odoo."""
+        if self._central_id_field_supported is not None:
+            return self._central_id_field_supported
+
+        try:
+            uid = self._authenticate_odoo()
+            models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
+            fields_info = models.execute_kw(
+                ODOO_DB,
+                uid,
+                ODOO_PASSWORD,
+                "product.template",
+                "fields_get",
+                [["central_id"]],
+            )
+            self._central_id_field_supported = "central_id" in fields_info
+        except Exception:
+            self._central_id_field_supported = False
+
+        return self._central_id_field_supported
 
     def connect_rabbitmq(self):
         """Connect to RabbitMQ broker."""
@@ -117,24 +140,25 @@ class OdooReceiver:
         self, central_id: str, wordpress_id: str, product_name: str
     ) -> Optional[int]:
         """
-        Find a product in Odoo by central ID (stored in default_code).
+        Find a product in Odoo by central ID field.
 
-        Searches by central ID first, then WordPress ID, and finally by name.
+        Searches by central_id first, then WordPress ID in default_code,
+        and finally by name.
         Returns the product.template ID or None if not found.
         """
         try:
             uid = self._authenticate_odoo()
             models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
 
-            # First try to find by central ID (stored in default_code)
-            if central_id:
+            # First try to find by central_id field.
+            if central_id and self.supports_central_id_field():
                 product_ids = models.execute_kw(
                     ODOO_DB,
                     uid,
                     ODOO_PASSWORD,
                     "product.template",
                     "search",
-                    [[("default_code", "=", f"CID-{central_id}")]],
+                    [[("central_id", "=", central_id)]],
                 )
 
                 if product_ids:
@@ -194,7 +218,7 @@ class OdooReceiver:
         return uid
 
     def create_product(self, product: Dict[str, str]) -> Optional[int]:
-        """Create a new product in Odoo with central ID stored in default_code."""
+        """Create a new product in Odoo with central_id stored in DB."""
         try:
             uid = self._authenticate_odoo()
             models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
@@ -209,13 +233,12 @@ class OdooReceiver:
                 "list_price": float(product.get("price", 0)) or 0.0,
                 "description": product.get("description", ""),
                 "available_in_pos": True,  # Make available in POS
-                # Store central ID in default_code field (e.g., "CID-<uuid>")
-                "default_code": (
-                    f"CID-{central_id}"
-                    if central_id
-                    else (f"WP-{wordpress_id}" if wordpress_id else "")
-                ),
+                # Keep legacy fallback for older matching flows.
+                "default_code": f"WP-{wordpress_id}" if wordpress_id else "",
             }
+
+            if central_id and self.supports_central_id_field():
+                product_data["central_id"] = central_id
 
             product_id = models.execute_kw(
                 ODOO_DB,
@@ -254,8 +277,8 @@ class OdooReceiver:
             }
 
             central_id = product.get("central_id", "")
-            if central_id:
-                update_data["default_code"] = f"CID-{central_id}"
+            if central_id and self.supports_central_id_field():
+                update_data["central_id"] = central_id
 
             models.execute_kw(
                 ODOO_DB,
