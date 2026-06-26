@@ -1,7 +1,7 @@
 {
     "name": "Product Sync Central ID",
     "version": "17.0.1.0.0",
-    "summary": "Adds shared central_id field to products",
+    "summary": "Adds shared product_central_id field to products",
     "depends": ["product"],
     "license": "LGPL-3",
     "data": [],
