@@ -139,6 +139,20 @@ class WordPressReceiver:
             if status < 200 or status >= 300:
                 raise RuntimeError(f"WordPress sync returned HTTP {status}: {body}")
 
+            content_type = (response.headers.get("Content-Type") or "").lower()
+            if "application/json" not in content_type:
+                raise RuntimeError(
+                    f"WordPress sync returned unexpected content type '{content_type}': {body[:200]}"
+                )
+
+            try:
+                response_json = json.loads(body)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"WordPress sync returned invalid JSON: {body[:200]}") from exc
+
+            if not isinstance(response_json, dict) or not response_json.get("ok"):
+                raise RuntimeError(f"WordPress sync returned non-ok payload: {body[:200]}")
+
             logger.info("WordPress sync succeeded with HTTP %s", status)
 
     def on_message(self, channel, method, properties, body):

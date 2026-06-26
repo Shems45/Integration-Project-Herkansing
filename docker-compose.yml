@@ -215,7 +215,7 @@ services:
       RABBITMQ_PASSWORD: admin
       RABBITMQ_QUEUE: wordpress.product.events
       WORDPRESS_URL: http://wordpress
-      WORDPRESS_SYNC_ENDPOINT: http://wordpress/wp-json/product-sync/v1/odoo-product-event
+      WORDPRESS_SYNC_ENDPOINT: http://wordpress/?rest_route=/product-sync/v1/odoo-product-event
       WORDPRESS_SYNC_TOKEN: school-project-token
     restart: unless-stopped
     networks:
