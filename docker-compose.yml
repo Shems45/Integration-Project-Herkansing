@@ -33,7 +33,7 @@ services:
       HOST: odoo-db
       USER: odoo
       PASSWORD: odoo
-    command: ["odoo", "-d", "odoo", "--addons-path=/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons,/var/lib/odoo/addons/17.0", "-i", "base,point_of_sale,product_sync_central_id", "--without-demo=all", "--stop-after-init"]
+    command: ["odoo", "-d", "odoo", "--addons-path=/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons,/var/lib/odoo/addons/17.0", "-i", "base,point_of_sale,product_sync_central_id,product_event_hooks", "--without-demo=all", "--stop-after-init"]
     volumes:
       - odoo-data:/var/lib/odoo
       - ./odoo-addons:/mnt/extra-addons
@@ -51,6 +51,8 @@ services:
         condition: service_healthy
       odoo-init:
         condition: service_completed_successfully
+      odoo_sender:
+        condition: service_started
     environment:
       HOST: odoo-db
       USER: odoo
@@ -136,6 +138,26 @@ services:
       RABBITMQ_PASS: admin
       RABBITMQ_EXCHANGE: product.events
       RABBITMQ_QUEUE: odoo.product.events
+    expose:
+      - "8000"
+    networks:
+      - project-network
+
+  odoo_sender:
+    # Receives product events from Odoo and publishes XML to RabbitMQ.
+    # Flow: Odoo hook -> odoo_sender -> XML -> RabbitMQ topic exchange -> wordpress.product.events queue
+    build: ./services/odoo_sender
+    container_name: odoo_sender
+    depends_on:
+      rabbitmq:
+        condition: service_started
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: admin
+      RABBITMQ_PASSWORD: admin
+      RABBITMQ_EXCHANGE: product.events
+      RABBITMQ_QUEUE: wordpress.product.events
     expose:
       - "8000"
     networks:

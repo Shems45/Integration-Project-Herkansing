@@ -49,6 +49,32 @@ The local stack runs on one Linux VM and includes:
 
 All services share one Docker network and use volumes for persistent data.
 
+## Odoo Sender Flow
+
+Product events from Odoo follow this path:
+
+1. Odoo product hook in custom addon (`product_event_hooks`)
+2. HTTP POST to internal service `odoo_sender` (`/odoo-product-event`)
+3. `odoo_sender` converts payload to XML
+4. `odoo_sender` publishes XML to RabbitMQ topic exchange `product.events`
+5. Routing keys:
+	- `odoo.product.created`
+	- `odoo.product.updated`
+	- `odoo.product.deleted`
+6. All keys are bound to queue `wordpress.product.events`
+
+Sync identifier rules:
+
+- `product_central_id` is the stable sync identifier.
+- In Odoo, `product.template.default_code` stores `product_central_id`.
+- XML contains only `<productCentralId>...</productCentralId>` as identifier.
+- Odoo internal database `product.id` is never sent in XML.
+
+Currency rule:
+
+- Prices are sent with `currency="EUR"` in XML.
+- Set your Odoo company currency to EUR in the Odoo UI.
+
 Main ports:
 
 - WordPress: `8080`
