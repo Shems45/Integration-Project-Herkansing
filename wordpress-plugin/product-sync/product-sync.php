@@ -27,6 +27,7 @@ function integration_product_sync_activate()
 
     $sql = "CREATE TABLE {$table_name} (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        central_id VARCHAR(36) NULL,
         name VARCHAR(255) NOT NULL,
         price DECIMAL(10,2) NOT NULL DEFAULT 0.00,
         quantity INT NOT NULL DEFAULT 0,
@@ -34,12 +35,48 @@ function integration_product_sync_activate()
         sync_status VARCHAR(50) NOT NULL DEFAULT 'pending',
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        PRIMARY KEY (id)
+        PRIMARY KEY (id),
+        UNIQUE KEY central_id (central_id)
     ) {$charset_collate};";
 
     dbDelta($sql);
+
+    integration_product_sync_backfill_central_ids();
 }
 register_activation_hook(__FILE__, 'integration_product_sync_activate');
+
+function integration_product_sync_generate_central_id()
+{
+    if (function_exists('wp_generate_uuid4')) {
+        return wp_generate_uuid4();
+    }
+
+    return uniqid('central-', true);
+}
+
+function integration_product_sync_backfill_central_ids()
+{
+    global $wpdb;
+
+    $table_name = integration_product_sync_table_name();
+    $products_without_central_id = $wpdb->get_results(
+        "SELECT id FROM {$table_name} WHERE central_id IS NULL OR central_id = ''"
+    );
+
+    if (empty($products_without_central_id)) {
+        return;
+    }
+
+    foreach ($products_without_central_id as $product) {
+        $wpdb->update(
+            $table_name,
+            array('central_id' => integration_product_sync_generate_central_id()),
+            array('id' => (int) $product->id),
+            array('%s'),
+            array('%d')
+        );
+    }
+}
 
 function integration_product_sync_send_event_to_wp_sender($action, $product_id, $product_data = array())
 {
@@ -48,6 +85,7 @@ function integration_product_sync_send_event_to_wp_sender($action, $product_id, 
     $payload = array(
         'action' => $action,
         'id' => (int) $product_id,
+        'central_id' => isset($product_data['central_id']) ? sanitize_text_field((string) $product_data['central_id']) : '',
         'name' => isset($product_data['name']) ? sanitize_text_field((string) $product_data['name']) : '',
         'price' => isset($product_data['price']) ? (float) $product_data['price'] : 0,
         'quantity' => isset($product_data['quantity']) ? (int) $product_data['quantity'] : 0,
@@ -129,6 +167,7 @@ function integration_product_sync_handle_actions()
     $action = sanitize_text_field(wp_unslash($_POST['integration_action']));
 
     if ($action === 'create') {
+        $central_id = integration_product_sync_generate_central_id();
         $name = sanitize_text_field(wp_unslash($_POST['name'] ?? ''));
         $price = (float) sanitize_text_field(wp_unslash($_POST['price'] ?? '0'));
         $quantity = (int) sanitize_text_field(wp_unslash($_POST['quantity'] ?? '0'));
@@ -138,13 +177,14 @@ function integration_product_sync_handle_actions()
         $wpdb->insert(
             $table_name,
             array(
+                'central_id' => $central_id,
                 'name' => $name,
                 'price' => $price,
                 'quantity' => $quantity,
                 'description' => $description,
                 'sync_status' => $sync_status,
             ),
-            array('%s', '%f', '%d', '%s', '%s')
+            array('%s', '%s', '%f', '%d', '%s', '%s')
         );
 
         $product_id = (int) $wpdb->insert_id;
@@ -152,6 +192,7 @@ function integration_product_sync_handle_actions()
         // Internal hook is handled below and forwarded to the wp_sender service.
         do_action('integration_product_created', $product_id, array(
             'id' => $product_id,
+            'central_id' => $central_id,
             'name' => $name,
             'price' => $price,
             'quantity' => $quantity,
@@ -164,6 +205,17 @@ function integration_product_sync_handle_actions()
 
     if ($action === 'update') {
         $id = (int) sanitize_text_field(wp_unslash($_POST['id'] ?? '0'));
+
+        $existing_product = $wpdb->get_row(
+            $wpdb->prepare("SELECT central_id FROM {$table_name} WHERE id = %d", $id),
+            ARRAY_A
+        );
+
+        $central_id = isset($existing_product['central_id']) ? (string) $existing_product['central_id'] : '';
+        if ($central_id === '') {
+            $central_id = integration_product_sync_generate_central_id();
+        }
+
         $name = sanitize_text_field(wp_unslash($_POST['name'] ?? ''));
         $price = (float) sanitize_text_field(wp_unslash($_POST['price'] ?? '0'));
         $quantity = (int) sanitize_text_field(wp_unslash($_POST['quantity'] ?? '0'));
@@ -173,6 +225,7 @@ function integration_product_sync_handle_actions()
         $wpdb->update(
             $table_name,
             array(
+                'central_id' => $central_id,
                 'name' => $name,
                 'price' => $price,
                 'quantity' => $quantity,
@@ -180,13 +233,14 @@ function integration_product_sync_handle_actions()
                 'sync_status' => $sync_status,
             ),
             array('id' => $id),
-            array('%s', '%f', '%d', '%s', '%s'),
+            array('%s', '%s', '%f', '%d', '%s', '%s'),
             array('%d')
         );
 
         // Internal hook is handled below and forwarded to the wp_sender service.
         do_action('integration_product_updated', $id, array(
             'id' => $id,
+            'central_id' => $central_id,
             'name' => $name,
             'price' => $price,
             'quantity' => $quantity,
@@ -210,6 +264,7 @@ function integration_product_sync_handle_actions()
         // Internal hook is handled below and forwarded to the wp_sender service.
         do_action('integration_product_deleted', $id, array(
             'id' => $id,
+            'central_id' => isset($existing_product['central_id']) ? $existing_product['central_id'] : '',
             'name' => isset($existing_product['name']) ? $existing_product['name'] : '',
             'price' => isset($existing_product['price']) ? $existing_product['price'] : 0,
             'quantity' => isset($existing_product['quantity']) ? $existing_product['quantity'] : 0,

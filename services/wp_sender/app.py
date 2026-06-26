@@ -25,6 +25,7 @@ def product_event_to_xml(payload):
 
     ET.SubElement(root, "action").text = str(payload.get("action", ""))
     ET.SubElement(root, "id").text = str(payload.get("id", ""))
+    ET.SubElement(root, "central_id").text = str(payload.get("central_id", ""))
     ET.SubElement(root, "name").text = str(payload.get("name", ""))
     ET.SubElement(root, "price").text = str(payload.get("price", ""))
     ET.SubElement(root, "quantity").text = str(payload.get("quantity", ""))
@@ -85,6 +86,7 @@ def product_event():
     payload = {
         "action": action,
         "id": data.get("id", ""),
+        "central_id": data.get("central_id", ""),
         "name": data.get("name", ""),
         "price": data.get("price", ""),
         "quantity": data.get("quantity", ""),

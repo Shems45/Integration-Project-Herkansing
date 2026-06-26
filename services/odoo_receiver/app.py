@@ -97,6 +97,7 @@ class OdooReceiver:
             product = {
                 "action": root.findtext("action", "").strip(),
                 "id": root.findtext("id", "").strip(),
+                "central_id": root.findtext("central_id", "").strip(),
                 "name": root.findtext("name", "").strip(),
                 "price": root.findtext("price", "").strip(),
                 "quantity": root.findtext("quantity", "").strip(),
@@ -104,7 +105,8 @@ class OdooReceiver:
             }
             logger.info(
                 f"✓ Parsed XML message - Action: {product['action']}, "
-                f"Name: {product['name']}, ID: {product['id']}"
+                f"Name: {product['name']}, ID: {product['id']}, "
+                f"Central ID: {product['central_id']}"
             )
             return product
         except ET.ParseError as e:
@@ -112,19 +114,37 @@ class OdooReceiver:
             raise
 
     def find_product_in_odoo(
-        self, wordpress_id: str, product_name: str
+        self, central_id: str, wordpress_id: str, product_name: str
     ) -> Optional[int]:
         """
-        Find a product in Odoo by WordPress ID (stored in default_code).
+        Find a product in Odoo by central ID (stored in default_code).
 
-        Searches by default_code first (WordPress product ID), falls back to name.
+        Searches by central ID first, then WordPress ID, and finally by name.
         Returns the product.template ID or None if not found.
         """
         try:
             uid = self._authenticate_odoo()
             models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
 
-            # First try to find by WordPress ID (stored in default_code)
+            # First try to find by central ID (stored in default_code)
+            if central_id:
+                product_ids = models.execute_kw(
+                    ODOO_DB,
+                    uid,
+                    ODOO_PASSWORD,
+                    "product.template",
+                    "search",
+                    [[("default_code", "=", f"CID-{central_id}")]],
+                )
+
+                if product_ids:
+                    logger.info(
+                        f"✓ Found product by central ID: {central_id} "
+                        f"(Odoo ID: {product_ids[0]})"
+                    )
+                    return product_ids[0]
+
+            # Backward-compatible fallback for older records
             if wordpress_id:
                 product_ids = models.execute_kw(
                     ODOO_DB,
@@ -174,12 +194,13 @@ class OdooReceiver:
         return uid
 
     def create_product(self, product: Dict[str, str]) -> Optional[int]:
-        """Create a new product in Odoo with WordPress ID stored in default_code."""
+        """Create a new product in Odoo with central ID stored in default_code."""
         try:
             uid = self._authenticate_odoo()
             models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
 
             wordpress_id = product.get("id", "")
+            central_id = product.get("central_id", "")
 
             # Prepare product data for Odoo
             product_data = {
@@ -188,8 +209,12 @@ class OdooReceiver:
                 "list_price": float(product.get("price", 0)) or 0.0,
                 "description": product.get("description", ""),
                 "available_in_pos": True,  # Make available in POS
-                # Store WordPress ID in default_code field (e.g., "WP-1001")
-                "default_code": f"WP-{wordpress_id}" if wordpress_id else "",
+                # Store central ID in default_code field (e.g., "CID-<uuid>")
+                "default_code": (
+                    f"CID-{central_id}"
+                    if central_id
+                    else (f"WP-{wordpress_id}" if wordpress_id else "")
+                ),
             }
 
             product_id = models.execute_kw(
@@ -204,7 +229,8 @@ class OdooReceiver:
             logger.info(
                 f"✓ Created product in Odoo: {product['name']} "
                 f"(Odoo ID: {product_id}, WordPress ID: {wordpress_id}, "
-                f"code: WP-{wordpress_id})"
+                f"Central ID: {central_id}, "
+                f"code: {product_data['default_code']})"
             )
             return product_id
 
@@ -227,6 +253,10 @@ class OdooReceiver:
                 "description": product.get("description", ""),
             }
 
+            central_id = product.get("central_id", "")
+            if central_id:
+                update_data["default_code"] = f"CID-{central_id}"
+
             models.execute_kw(
                 ODOO_DB,
                 uid,
@@ -238,7 +268,8 @@ class OdooReceiver:
 
             logger.info(
                 f"✓ Updated product in Odoo: {product['name']} "
-                f"(Odoo ID: {odoo_product_id}, WordPress ID: {product.get('id')})"
+                f"(Odoo ID: {odoo_product_id}, WordPress ID: {product.get('id')}, "
+                f"Central ID: {product.get('central_id')})"
             )
             return True
 
@@ -284,6 +315,7 @@ class OdooReceiver:
 
             action = product.get("action", "").lower()
             wordpress_id = product.get("id", "")
+            central_id = product.get("central_id", "")
             product_name = product.get("name", "")
 
             if action == "created":
@@ -292,24 +324,30 @@ class OdooReceiver:
 
             elif action == "updated":
                 # Find and update existing product
-                odoo_product_id = self.find_product_in_odoo(wordpress_id, product_name)
+                odoo_product_id = self.find_product_in_odoo(
+                    central_id, wordpress_id, product_name
+                )
                 if odoo_product_id:
                     self.update_product(odoo_product_id, product)
                 else:
                     logger.warning(
                         f"Cannot update: product not found in Odoo "
-                        f"(WordPress ID: {wordpress_id}, Name: {product_name})"
+                        f"(Central ID: {central_id}, WordPress ID: {wordpress_id}, "
+                        f"Name: {product_name})"
                     )
 
             elif action == "deleted":
                 # Archive (soft delete) the product
-                odoo_product_id = self.find_product_in_odoo(wordpress_id, product_name)
+                odoo_product_id = self.find_product_in_odoo(
+                    central_id, wordpress_id, product_name
+                )
                 if odoo_product_id:
                     self.archive_product(odoo_product_id, product_name)
                 else:
                     logger.warning(
                         f"Cannot delete: product not found in Odoo "
-                        f"(WordPress ID: {wordpress_id}, Name: {product_name})"
+                        f"(Central ID: {central_id}, WordPress ID: {wordpress_id}, "
+                        f"Name: {product_name})"
                     )
 
             else:
