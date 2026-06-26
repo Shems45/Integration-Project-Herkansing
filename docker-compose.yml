@@ -89,6 +89,8 @@ services:
     depends_on:
       wordpress-db:
         condition: service_healthy
+      wp_sender:
+        condition: service_started
     environment:
       WORDPRESS_DB_HOST: wordpress-db:3306
       WORDPRESS_DB_USER: wordpress
@@ -114,6 +116,25 @@ services:
       - "15672:15672"
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
+    networks:
+      - project-network
+
+  wp_sender:
+    # Receives product events from WordPress and publishes XML to RabbitMQ.
+    build: ./services/wp_sender
+    container_name: wp_sender
+    depends_on:
+      rabbitmq:
+        condition: service_started
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: admin
+      RABBITMQ_PASS: admin
+      RABBITMQ_EXCHANGE: product.events
+      RABBITMQ_QUEUE: odoo.product.events
+    expose:
+      - "8000"
     networks:
       - project-network
 

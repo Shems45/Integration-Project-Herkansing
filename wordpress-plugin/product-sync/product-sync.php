@@ -1,4 +1,5 @@
 <?php
+
 /**
  * Plugin Name: Product Sync
  * Description: Simple product management UI for the integration project.
@@ -39,6 +40,48 @@ function integration_product_sync_activate()
     dbDelta($sql);
 }
 register_activation_hook(__FILE__, 'integration_product_sync_activate');
+
+function integration_product_sync_send_event_to_wp_sender($action, $product_id, $product_data = array())
+{
+    $endpoint = 'http://wp_sender:8000/product-event';
+
+    $payload = array(
+        'action' => $action,
+        'id' => (int) $product_id,
+        'name' => isset($product_data['name']) ? sanitize_text_field((string) $product_data['name']) : '',
+        'price' => isset($product_data['price']) ? (float) $product_data['price'] : 0,
+        'quantity' => isset($product_data['quantity']) ? (int) $product_data['quantity'] : 0,
+        'description' => isset($product_data['description']) ? sanitize_text_field((string) $product_data['description']) : '',
+    );
+
+    // Flow: WordPress hook -> wp_sender -> XML -> RabbitMQ topic exchange -> queue for Odoo receiver.
+    wp_remote_post(
+        $endpoint,
+        array(
+            'timeout' => 5,
+            'headers' => array('Content-Type' => 'application/json'),
+            'body' => wp_json_encode($payload),
+        )
+    );
+}
+
+function integration_product_sync_on_created($product_id, $product_data)
+{
+    integration_product_sync_send_event_to_wp_sender('created', $product_id, $product_data);
+}
+add_action('integration_product_created', 'integration_product_sync_on_created', 10, 2);
+
+function integration_product_sync_on_updated($product_id, $product_data)
+{
+    integration_product_sync_send_event_to_wp_sender('updated', $product_id, $product_data);
+}
+add_action('integration_product_updated', 'integration_product_sync_on_updated', 10, 2);
+
+function integration_product_sync_on_deleted($product_id, $product_data)
+{
+    integration_product_sync_send_event_to_wp_sender('deleted', $product_id, $product_data);
+}
+add_action('integration_product_deleted', 'integration_product_sync_on_deleted', 10, 2);
 
 function integration_product_sync_admin_menu()
 {
@@ -106,7 +149,7 @@ function integration_product_sync_handle_actions()
 
         $product_id = (int) $wpdb->insert_id;
 
-        // Later this hook can be connected to the wp_sender service to publish events.
+        // Internal hook is handled below and forwarded to the wp_sender service.
         do_action('integration_product_created', $product_id, array(
             'id' => $product_id,
             'name' => $name,
@@ -141,7 +184,7 @@ function integration_product_sync_handle_actions()
             array('%d')
         );
 
-        // Later this hook can be connected to the wp_sender service to publish events.
+        // Internal hook is handled below and forwarded to the wp_sender service.
         do_action('integration_product_updated', $id, array(
             'id' => $id,
             'name' => $name,
@@ -157,10 +200,22 @@ function integration_product_sync_handle_actions()
     if ($action === 'delete') {
         $id = (int) sanitize_text_field(wp_unslash($_POST['id'] ?? '0'));
 
+        $existing_product = $wpdb->get_row(
+            $wpdb->prepare("SELECT * FROM {$table_name} WHERE id = %d", $id),
+            ARRAY_A
+        );
+
         $wpdb->delete($table_name, array('id' => $id), array('%d'));
 
-        // Later this hook can be connected to the wp_sender service to publish events.
-        do_action('integration_product_deleted', $id);
+        // Internal hook is handled below and forwarded to the wp_sender service.
+        do_action('integration_product_deleted', $id, array(
+            'id' => $id,
+            'name' => isset($existing_product['name']) ? $existing_product['name'] : '',
+            'price' => isset($existing_product['price']) ? $existing_product['price'] : 0,
+            'quantity' => isset($existing_product['quantity']) ? $existing_product['quantity'] : 0,
+            'description' => isset($existing_product['description']) ? $existing_product['description'] : '',
+            'sync_status' => isset($existing_product['sync_status']) ? $existing_product['sync_status'] : 'pending',
+        ));
 
         integration_product_sync_redirect_with_message('Product deleted.');
     }
@@ -193,7 +248,7 @@ function integration_product_sync_render_page()
     if (isset($_GET['message'])) {
         $message = sanitize_text_field(wp_unslash($_GET['message']));
     }
-    ?>
+?>
     <div class="wrap">
         <h1><?php echo esc_html('Product Sync'); ?></h1>
 
@@ -288,5 +343,5 @@ function integration_product_sync_render_page()
             </tbody>
         </table>
     </div>
-    <?php
+<?php
 }
