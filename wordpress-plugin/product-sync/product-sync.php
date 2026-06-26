@@ -62,10 +62,19 @@ function integration_product_sync_ensure_schema()
 
     if ($table_exists !== $table_name) {
         integration_product_sync_create_or_update_table();
-        return;
+        $table_exists = $wpdb->get_var(
+            $wpdb->prepare('SHOW TABLES LIKE %s', $table_name)
+        );
+        if ($table_exists !== $table_name) {
+            return;
+        }
     }
 
     $columns = $wpdb->get_col("SHOW COLUMNS FROM {$table_name}", 0);
+    if (!is_array($columns)) {
+        $columns = array();
+    }
+
     if (!in_array('product_central_id', $columns, true)) {
         $wpdb->query(
             "ALTER TABLE {$table_name} ADD COLUMN product_central_id VARCHAR(36) NULL AFTER id"
@@ -216,7 +225,8 @@ function integration_product_sync_redirect_with_message($message)
     $url = add_query_arg(
         array(
             'page' => 'integration-product-sync',
-            'message' => rawurlencode($message),
+            // add_query_arg handles encoding itself.
+            'message' => $message,
         ),
         admin_url('admin.php')
     );

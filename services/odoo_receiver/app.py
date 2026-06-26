@@ -346,10 +346,8 @@ class OdooReceiver:
                 "list_price": self._safe_float(product.get("price", 0), 0.0),
                 "description": product.get("description", ""),
                 "available_in_pos": True,  # Make available in POS
-                # Show shared product ID in POS/product code.
-                "default_code": product_central_id if product_central_id else (
-                    f"WP-{wordpress_id}" if wordpress_id else ""
-                ),
+                # Set visible code after create to the real Odoo ID.
+                "default_code": "",
             }
 
             if product_central_id and self.supports_product_central_id_field():
@@ -364,11 +362,21 @@ class OdooReceiver:
                 [product_data],
             )
 
+            # Ensure product code in UI is the actual Odoo product ID.
+            models.execute_kw(
+                ODOO_DB,
+                uid,
+                ODOO_PASSWORD,
+                "product.template",
+                "write",
+                [[product_id], {"default_code": str(product_id)}],
+            )
+
             logger.info(
                 f"✓ Created product in Odoo: {product['name']} "
                 f"(Odoo ID: {product_id}, WordPress ID: {wordpress_id}, "
                 f"Product Central ID: {product_central_id}, "
-                f"code: {product_data['default_code']})"
+                f"code: {product_id})"
             )
 
             self.set_on_hand_quantity(
@@ -399,7 +407,9 @@ class OdooReceiver:
             product_central_id = product.get("product_central_id", "")
             if product_central_id and self.supports_product_central_id_field():
                 update_data["product_central_id"] = product_central_id
-                update_data["default_code"] = product_central_id
+
+            # Keep visible code aligned with Odoo ID for existing products too.
+            update_data["default_code"] = str(odoo_product_id)
 
             models.execute_kw(
                 ODOO_DB,
