@@ -7,9 +7,9 @@ services:
     container_name: odoo-db
     environment:
       # Keep default database as postgres; Odoo database is initialized separately.
-      POSTGRES_DB: postgres
-      POSTGRES_USER: odoo
-      POSTGRES_PASSWORD: odoo
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:-odoo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-odoo}
     volumes:
       - odoo-db-data:/var/lib/postgresql/data
     # Healthcheck ensures Odoo starts only after PostgreSQL is ready.
@@ -31,8 +31,8 @@ services:
         condition: service_healthy
     environment:
       HOST: odoo-db
-      USER: odoo
-      PASSWORD: odoo
+      USER: ${POSTGRES_USER:-odoo}
+      PASSWORD: ${POSTGRES_PASSWORD:-odoo}
     # /usr/lib/python3/dist-packages/odoo/addons = default Odoo addons,
     # /mnt/extra-addons = our custom project addons.
     command: ["odoo", "-d", "odoo", "--addons-path=/usr/lib/python3/dist-packages/odoo/addons,/mnt/extra-addons", "-i", "base,point_of_sale,product_sync_central_id,product_event_hooks", "--without-demo=all", "--stop-after-init"]
@@ -57,9 +57,9 @@ services:
         condition: service_started
     environment:
       HOST: odoo-db
-      USER: odoo
-      PASSWORD: odoo
-      INTEGRATION_HTTP_TOKEN: school-project-token
+      USER: ${POSTGRES_USER:-odoo}
+      PASSWORD: ${POSTGRES_PASSWORD:-odoo}
+      INTEGRATION_HTTP_TOKEN: ${INTEGRATION_HTTP_TOKEN:-school-project-token}
     ports:
       - "8069:8069"
     # /usr/lib/python3/dist-packages/odoo/addons = default Odoo addons,
@@ -76,10 +76,10 @@ services:
     image: mysql:8.0
     container_name: wordpress-db
     environment:
-      MYSQL_DATABASE: wordpress
-      MYSQL_USER: wordpress
-      MYSQL_PASSWORD: wordpress
-      MYSQL_ROOT_PASSWORD: wordpress
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-wordpress}
+      MYSQL_USER: ${MYSQL_USER:-wordpress}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-wordpress}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-wordpress}
     volumes:
       - wordpress-db-data:/var/lib/mysql
     # Healthcheck ensures WordPress starts only after MySQL is ready.
@@ -102,12 +102,12 @@ services:
       wp_sender:
         condition: service_started
     environment:
-      WORDPRESS_DB_HOST: wordpress-db:3306
-      WORDPRESS_DB_USER: wordpress
-      WORDPRESS_DB_PASSWORD: wordpress
-      WORDPRESS_DB_NAME: wordpress
-      WORDPRESS_SYNC_TOKEN: school-project-token
-      INTEGRATION_HTTP_TOKEN: school-project-token
+      WORDPRESS_DB_HOST: ${WORDPRESS_DB_HOST:-wordpress-db:3306}
+      WORDPRESS_DB_USER: ${WORDPRESS_DB_USER:-wordpress}
+      WORDPRESS_DB_PASSWORD: ${WORDPRESS_DB_PASSWORD:-wordpress}
+      WORDPRESS_DB_NAME: ${WORDPRESS_DB_NAME:-wordpress}
+      WORDPRESS_SYNC_TOKEN: ${WORDPRESS_SYNC_TOKEN:-school-project-token}
+      INTEGRATION_HTTP_TOKEN: ${INTEGRATION_HTTP_TOKEN:-school-project-token}
     ports:
       - "8080:80"
     volumes:
@@ -121,8 +121,8 @@ services:
     image: rabbitmq:3-management
     container_name: rabbitmq
     environment:
-      RABBITMQ_DEFAULT_USER: admin
-      RABBITMQ_DEFAULT_PASS: admin
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-admin}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-admin}
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
@@ -146,13 +146,13 @@ services:
         condition: service_healthy
     environment:
       RABBITMQ_HOST: rabbitmq
-      RABBITMQ_PORT: 5672
-      RABBITMQ_USER: admin
-      RABBITMQ_PASS: admin
-      RABBITMQ_EXCHANGE: product.events
+      RABBITMQ_PORT: ${RABBITMQ_PORT:-5672}
+      RABBITMQ_USER: ${RABBITMQ_USER:-admin}
+      RABBITMQ_PASS: ${RABBITMQ_PASS:-admin}
+      RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE:-product.events}
       RABBITMQ_QUEUE: odoo.product.events
-      INTEGRATION_SECRET: change-me-school-secret
-      INTEGRATION_HTTP_TOKEN: school-project-token
+      INTEGRATION_SECRET: ${INTEGRATION_SECRET:-change-me-school-secret}
+      INTEGRATION_HTTP_TOKEN: ${INTEGRATION_HTTP_TOKEN:-school-project-token}
     volumes:
       - ./schemas:/app/schemas:ro
     expose:
@@ -171,13 +171,13 @@ services:
         condition: service_healthy
     environment:
       RABBITMQ_HOST: rabbitmq
-      RABBITMQ_PORT: 5672
-      RABBITMQ_USER: admin
-      RABBITMQ_PASSWORD: admin
-      RABBITMQ_EXCHANGE: product.events
+      RABBITMQ_PORT: ${RABBITMQ_PORT:-5672}
+      RABBITMQ_USER: ${RABBITMQ_USER:-admin}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-admin}
+      RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE:-product.events}
       RABBITMQ_QUEUE: wordpress.product.events
-      INTEGRATION_SECRET: change-me-school-secret
-      INTEGRATION_HTTP_TOKEN: school-project-token
+      INTEGRATION_SECRET: ${INTEGRATION_SECRET:-change-me-school-secret}
+      INTEGRATION_HTTP_TOKEN: ${INTEGRATION_HTTP_TOKEN:-school-project-token}
     volumes:
       - ./schemas:/app/schemas:ro
     expose:
@@ -199,16 +199,16 @@ services:
     environment:
       # RabbitMQ connection settings
       RABBITMQ_HOST: rabbitmq
-      RABBITMQ_PORT: 5672
-      RABBITMQ_USER: admin
-      RABBITMQ_PASSWORD: admin
+      RABBITMQ_PORT: ${RABBITMQ_PORT:-5672}
+      RABBITMQ_USER: ${RABBITMQ_USER:-admin}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-admin}
       RABBITMQ_QUEUE: odoo.product.events
-      INTEGRATION_SECRET: change-me-school-secret
+      INTEGRATION_SECRET: ${INTEGRATION_SECRET:-change-me-school-secret}
       # Odoo connection settings (XML-RPC API)
-      ODOO_URL: http://odoo:8069
-      ODOO_DB: odoo
-      ODOO_USERNAME: admin
-      ODOO_PASSWORD: admin
+      ODOO_URL: ${ODOO_URL:-http://odoo:8069}
+      ODOO_DB: ${ODOO_DB:-odoo}
+      ODOO_USERNAME: ${ODOO_USERNAME:-admin}
+      ODOO_PASSWORD: ${ODOO_PASSWORD:-admin}
     volumes:
       - ./schemas:/app/schemas:ro
     restart: unless-stopped
@@ -227,14 +227,14 @@ services:
         condition: service_started
     environment:
       RABBITMQ_HOST: rabbitmq
-      RABBITMQ_PORT: 5672
-      RABBITMQ_USER: admin
-      RABBITMQ_PASSWORD: admin
+      RABBITMQ_PORT: ${RABBITMQ_PORT:-5672}
+      RABBITMQ_USER: ${RABBITMQ_USER:-admin}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-admin}
       RABBITMQ_QUEUE: wordpress.product.events
-      INTEGRATION_SECRET: change-me-school-secret
-      WORDPRESS_URL: http://wordpress
-      WORDPRESS_SYNC_ENDPOINT: http://wordpress/?rest_route=/product-sync/v1/odoo-product-event
-      WORDPRESS_SYNC_TOKEN: school-project-token
+      INTEGRATION_SECRET: ${INTEGRATION_SECRET:-change-me-school-secret}
+      WORDPRESS_URL: ${WORDPRESS_URL:-http://wordpress}
+      WORDPRESS_SYNC_ENDPOINT: ${WORDPRESS_SYNC_ENDPOINT:-http://wordpress/?rest_route=/product-sync/v1/odoo-product-event}
+      WORDPRESS_SYNC_TOKEN: ${WORDPRESS_SYNC_TOKEN:-school-project-token}
     volumes:
       - ./schemas:/app/schemas:ro
     restart: unless-stopped

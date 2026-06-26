@@ -39,6 +39,16 @@ Run it from the project root with:
 docker compose up -d
 ```
 
+## Setup In 3 Steps
+
+1. Copy `.env.example` to `.env`.
+2. Set your local values in `.env` (especially tokens, secrets, and passwords).
+3. Start or refresh the stack:
+
+```bash
+docker compose up -d --build
+```
+
 ## Docker Compose Stack
 
 The local stack runs on one Linux VM and includes:
@@ -160,6 +170,12 @@ Environment variables used:
 
 - `INTEGRATION_SECRET=change-me-school-secret`
 - `INTEGRATION_HTTP_TOKEN=school-project-token`
+
+Configuration files:
+
+- `.env` contains local runtime values for Docker Compose (not committed).
+- `.env.example` contains safe placeholders and required keys for new setups.
+- Before starting the stack, copy `.env.example` to `.env` and set your own values.
 
 Sync identifier rule remains unchanged:
 
