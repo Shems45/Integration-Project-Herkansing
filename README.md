@@ -75,6 +75,38 @@ Currency rule:
 - Prices are sent with `currency="EUR"` in XML.
 - Set your Odoo company currency to EUR in the Odoo UI.
 
+## Canonical Product XML Schema
+
+Both senders now publish the same XML schema to RabbitMQ.
+
+- `wp_sender` sets `<source>wordpress</source>`
+- `odoo_sender` sets `<source>odoo</source>`
+
+Canonical XML example:
+
+```xml
+<?xml version='1.0' encoding='utf-8'?>
+<productEvent>
+	<source>wordpress</source>
+	<action>created</action>
+	<product>
+		<productCentralId>PROD-000001</productCentralId>
+		<name>Example product</name>
+		<price currency="EUR">12.00</price>
+		<quantity>5.00</quantity>
+		<description>Example description</description>
+		<availableInPos>true</availableInPos>
+		<active>true</active>
+	</product>
+</productEvent>
+```
+
+Identifier rule:
+
+- The only sync identifier is `product_central_id`.
+- In XML this is always `<productCentralId>...</productCentralId>`.
+- Local system IDs (WordPress ID, Odoo ID) are not used as sync identifiers in XML.
+
 ## WordPress Receiver Flow
 
 Incoming Odoo XML messages for WordPress follow this path:

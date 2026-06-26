@@ -20,16 +20,45 @@ ROUTING_KEYS = {
 }
 
 
-def product_event_to_xml(payload):
-    root = ET.Element("wordpress_product_event")
+def as_bool(value, default=True):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
 
+
+def as_decimal_string(value, default="0.00"):
+    try:
+        if isinstance(value, str):
+            value = value.replace(",", ".")
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return default
+
+
+def product_event_to_xml(payload):
+    # Canonical schema shared by both systems: productEvent -> product -> productCentralId
+    root = ET.Element("productEvent")
+    ET.SubElement(root, "source").text = "wordpress"
     ET.SubElement(root, "action").text = str(payload.get("action", ""))
-    ET.SubElement(root, "id").text = str(payload.get("id", ""))
-    ET.SubElement(root, "product_central_id").text = str(payload.get("product_central_id", ""))
-    ET.SubElement(root, "name").text = str(payload.get("name", ""))
-    ET.SubElement(root, "price").text = str(payload.get("price", ""))
-    ET.SubElement(root, "quantity").text = str(payload.get("quantity", ""))
-    ET.SubElement(root, "description").text = str(payload.get("description", ""))
+
+    product = ET.SubElement(root, "product")
+    ET.SubElement(product, "productCentralId").text = str(payload.get("product_central_id", ""))
+    ET.SubElement(product, "name").text = str(payload.get("name", ""))
+
+    price = ET.SubElement(product, "price")
+    price.set("currency", "EUR")
+    price.text = as_decimal_string(payload.get("price", 0), default="0.00")
+
+    ET.SubElement(product, "quantity").text = as_decimal_string(payload.get("quantity", 0), default="0.00")
+    ET.SubElement(product, "description").text = str(payload.get("description", ""))
+    ET.SubElement(product, "availableInPos").text = "true" if as_bool(payload.get("available_in_pos", True), default=True) else "false"
+    ET.SubElement(product, "active").text = "true" if as_bool(payload.get("active", True), default=True) else "false"
 
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
@@ -85,12 +114,13 @@ def product_event():
 
     payload = {
         "action": action,
-        "id": data.get("id", ""),
         "product_central_id": data.get("product_central_id", ""),
         "name": data.get("name", ""),
         "price": data.get("price", ""),
         "quantity": data.get("quantity", ""),
         "description": data.get("description", ""),
+        "available_in_pos": data.get("available_in_pos", True),
+        "active": data.get("active", True),
     }
 
     try:

@@ -114,36 +114,46 @@ class OdooReceiver:
                     raise
 
     def parse_product_event_xml(self, xml_data: bytes) -> Dict[str, str]:
-        """Parse XML product event message from WordPress."""
+        """Parse canonical XML product event message."""
         try:
             root = ET.fromstring(xml_data)
+
+            if root.tag != "productEvent":
+                raise ValueError("Unexpected root element, expected productEvent")
+
+            product_node = root.find("product")
+            if product_node is None:
+                raise ValueError("Missing product node")
+
+            price_node = product_node.find("price")
+            price_text = (price_node.text if price_node is not None else "0") or "0"
+
             product = {
                 "action": root.findtext("action", "").strip(),
-                "id": root.findtext("id", "").strip(),
-                "product_central_id": root.findtext("product_central_id", "").strip(),
-                "name": root.findtext("name", "").strip(),
-                "price": root.findtext("price", "").strip(),
-                "quantity": root.findtext("quantity", "").strip(),
-                "description": root.findtext("description", "").strip(),
+                "source": root.findtext("source", "").strip().lower(),
+                "product_central_id": (product_node.findtext("productCentralId", "").strip()),
+                "name": product_node.findtext("name", "").strip(),
+                "price": price_text.strip(),
+                "quantity": product_node.findtext("quantity", "").strip(),
+                "description": product_node.findtext("description", "").strip(),
+                "available_in_pos": product_node.findtext("availableInPos", "").strip(),
+                "active": product_node.findtext("active", "").strip(),
             }
             logger.info(
                 f"✓ Parsed XML message - Action: {product['action']}, "
-                f"Name: {product['name']}, ID: {product['id']}, "
+                f"Name: {product['name']}, Source: {product['source']}, "
                 f"Product Central ID: {product['product_central_id']}"
             )
             return product
-        except ET.ParseError as e:
+        except (ET.ParseError, ValueError) as e:
             logger.error(f"✗ Failed to parse XML message: {e}")
             raise
 
-    def find_product_in_odoo(
-        self, product_central_id: str, wordpress_id: str, product_name: str
-    ) -> Optional[int]:
+    def find_product_in_odoo(self, product_central_id: str, product_name: str) -> Optional[int]:
         """
         Find a product in Odoo by product_central_id field.
 
-        Searches by product_central_id first, then WordPress ID in default_code,
-        and finally by name.
+        Searches by product_central_id first and then by name.
         Returns the product.template ID or None if not found.
         """
         try:
@@ -182,24 +192,6 @@ class OdooReceiver:
                 if product_ids:
                     logger.info(
                         f"✓ Found product by default_code central ID: {product_central_id} "
-                        f"(Odoo ID: {product_ids[0]})"
-                    )
-                    return product_ids[0]
-
-            # Backward-compatible fallback for older records
-            if wordpress_id:
-                product_ids = models.execute_kw(
-                    ODOO_DB,
-                    uid,
-                    ODOO_PASSWORD,
-                    "product.template",
-                    "search",
-                    [[("default_code", "=", f"WP-{wordpress_id}")]],
-                )
-
-                if product_ids:
-                    logger.info(
-                        f"✓ Found product by WordPress ID: {wordpress_id} "
                         f"(Odoo ID: {product_ids[0]})"
                     )
                     return product_ids[0]
@@ -336,7 +328,6 @@ class OdooReceiver:
             uid = self._authenticate_odoo()
             models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
 
-            wordpress_id = product.get("id", "")
             product_central_id = product.get("product_central_id", "")
 
             # Prepare product data for Odoo
@@ -345,11 +336,10 @@ class OdooReceiver:
                 "type": "product",  # Standard product type
                 "list_price": self._safe_float(product.get("price", 0), 0.0),
                 "description": product.get("description", ""),
-                "available_in_pos": True,  # Make available in POS
+                "available_in_pos": self._to_bool(product.get("available_in_pos"), default=True),
+                "active": self._to_bool(product.get("active"), default=True),
                 # Keep shared sync identifier in default_code.
-                "default_code": product_central_id if product_central_id else (
-                    f"WP-{wordpress_id}" if wordpress_id else ""
-                ),
+                "default_code": product_central_id,
             }
 
             if product_central_id and self.supports_product_central_id_field():
@@ -367,7 +357,7 @@ class OdooReceiver:
 
             logger.info(
                 f"✓ Created product in Odoo: {product['name']} "
-                f"(Odoo ID: {product_id}, WordPress ID: {wordpress_id}, "
+                f"(Odoo ID: {product_id}, "
                 f"Product Central ID: {product_central_id}, "
                 f"code: {product_data['default_code']})"
             )
@@ -395,6 +385,8 @@ class OdooReceiver:
                 "name": product.get("name", ""),
                 "list_price": self._safe_float(product.get("price", 0), 0.0),
                 "description": product.get("description", ""),
+                "available_in_pos": self._to_bool(product.get("available_in_pos"), default=True),
+                "active": self._to_bool(product.get("active"), default=True),
             }
 
             product_central_id = product.get("product_central_id", "")
@@ -414,8 +406,7 @@ class OdooReceiver:
 
             logger.info(
                 f"✓ Updated product in Odoo: {product['name']} "
-                f"(Odoo ID: {odoo_product_id}, WordPress ID: {product.get('id')}, "
-                f"Product Central ID: {product.get('product_central_id')})"
+                f"(Odoo ID: {odoo_product_id}, Product Central ID: {product.get('product_central_id')})"
             )
 
             self.set_on_hand_quantity(
@@ -466,7 +457,6 @@ class OdooReceiver:
             product = self.parse_product_event_xml(body)
 
             action = product.get("action", "").lower()
-            wordpress_id = product.get("id", "")
             product_central_id = product.get("product_central_id", "")
             product_name = product.get("name", "")
 
@@ -476,30 +466,24 @@ class OdooReceiver:
 
             elif action == "updated":
                 # Find and update existing product
-                odoo_product_id = self.find_product_in_odoo(
-                    product_central_id, wordpress_id, product_name
-                )
+                odoo_product_id = self.find_product_in_odoo(product_central_id, product_name)
                 if odoo_product_id:
                     self.update_product(odoo_product_id, product)
                 else:
                     logger.warning(
                         f"Cannot update: product not found in Odoo "
-                        f"(Product Central ID: {product_central_id}, WordPress ID: {wordpress_id}, "
-                        f"Name: {product_name})"
+                        f"(Product Central ID: {product_central_id}, Name: {product_name})"
                     )
 
             elif action == "deleted":
                 # Archive (soft delete) the product
-                odoo_product_id = self.find_product_in_odoo(
-                    product_central_id, wordpress_id, product_name
-                )
+                odoo_product_id = self.find_product_in_odoo(product_central_id, product_name)
                 if odoo_product_id:
                     self.archive_product(odoo_product_id, product_name)
                 else:
                     logger.warning(
                         f"Cannot delete: product not found in Odoo "
-                        f"(Product Central ID: {product_central_id}, WordPress ID: {wordpress_id}, "
-                        f"Name: {product_name})"
+                        f"(Product Central ID: {product_central_id}, Name: {product_name})"
                     )
 
             else:
@@ -561,6 +545,15 @@ class OdooReceiver:
         except Exception as e:
             logger.error(f"✗ Error starting consumer: {e}")
             raise
+
+    def _to_bool(self, value: str, default: bool = False) -> bool:
+        """Parse bool-like strings used in canonical XML."""
+        if value is None:
+            return default
+        text = str(value).strip().lower()
+        if text == "":
+            return default
+        return text in {"1", "true", "yes", "on"}
 
     def run(self):
         """Main entry point for the service."""

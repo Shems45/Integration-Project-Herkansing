@@ -47,6 +47,7 @@ def as_decimal_string(value, default="0.00"):
 
 
 def product_event_to_xml(payload):
+    # Canonical schema shared by both systems: productEvent -> product -> productCentralId
     root = ET.Element("productEvent")
     ET.SubElement(root, "source").text = "odoo"
     ET.SubElement(root, "action").text = str(payload.get("action", ""))
@@ -64,7 +65,7 @@ def product_event_to_xml(payload):
     ET.SubElement(product, "availableInPos").text = "true" if as_bool(payload.get("available_in_pos", False)) else "false"
     ET.SubElement(product, "active").text = "true" if as_bool(payload.get("active", True)) else "false"
 
-    return ET.tostring(root, encoding="utf-8", xml_declaration=False)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
 def publish_event(action, xml_message):
