@@ -129,7 +129,8 @@ class ProductTemplate(models.Model):
                         "default_code/product_central_id is managed automatically by integration hooks"
                     )
 
-        products = super().create(vals_list)
+        # Avoid duplicate integration events from internal writes that can happen during create.
+        products = super(ProductTemplate, self.with_context(skip_product_event_hook=True)).create(vals_list)
         products._ensure_product_central_id()
         products._send_event_to_odoo_sender("created")
         return products

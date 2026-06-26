@@ -36,6 +36,7 @@ class OdooReceiver:
         self.rabbitmq_channel = None
         self.odoo_client = None
         self._product_central_id_field_supported = None
+        self._product_template_fields = None
 
     def supports_product_central_id_field(self) -> bool:
         """Check whether product.template.product_central_id is available in Odoo."""
@@ -227,6 +228,27 @@ class OdooReceiver:
             raise Exception("Failed to authenticate with Odoo")
         return uid
 
+    def supports_product_template_field(self, field_name: str) -> bool:
+        """Check whether a product.template field exists in current Odoo database."""
+        if self._product_template_fields is None:
+            try:
+                uid = self._authenticate_odoo()
+                models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
+                fields_info = models.execute_kw(
+                    ODOO_DB,
+                    uid,
+                    ODOO_PASSWORD,
+                    "product.template",
+                    "fields_get",
+                    [],
+                    {"attributes": ["type"]},
+                )
+                self._product_template_fields = set(fields_info.keys())
+            except Exception:
+                self._product_template_fields = set()
+
+        return field_name in self._product_template_fields
+
     def _safe_float(self, value: str, default: float = 0.0) -> float:
         """Parse a numeric string to float, accepting comma decimals."""
         try:
@@ -335,12 +357,19 @@ class OdooReceiver:
                 "name": product.get("name", "Unknown Product"),
                 "type": "product",  # Standard product type
                 "list_price": self._safe_float(product.get("price", 0), 0.0),
-                "description": product.get("description", ""),
-                "available_in_pos": self._to_bool(product.get("available_in_pos"), default=True),
-                "active": self._to_bool(product.get("active"), default=True),
                 # Keep shared sync identifier in default_code.
                 "default_code": product_central_id,
             }
+
+            description = product.get("description", "")
+            if self.supports_product_template_field("description"):
+                product_data["description"] = description
+            if self.supports_product_template_field("description_sale"):
+                product_data["description_sale"] = description
+            if self.supports_product_template_field("available_in_pos"):
+                product_data["available_in_pos"] = self._to_bool(product.get("available_in_pos"), default=True)
+            if self.supports_product_template_field("active"):
+                product_data["active"] = self._to_bool(product.get("active"), default=True)
 
             if product_central_id and self.supports_product_central_id_field():
                 product_data["product_central_id"] = product_central_id
@@ -384,10 +413,17 @@ class OdooReceiver:
             update_data = {
                 "name": product.get("name", ""),
                 "list_price": self._safe_float(product.get("price", 0), 0.0),
-                "description": product.get("description", ""),
-                "available_in_pos": self._to_bool(product.get("available_in_pos"), default=True),
-                "active": self._to_bool(product.get("active"), default=True),
             }
+
+            description = product.get("description", "")
+            if self.supports_product_template_field("description"):
+                update_data["description"] = description
+            if self.supports_product_template_field("description_sale"):
+                update_data["description_sale"] = description
+            if self.supports_product_template_field("available_in_pos"):
+                update_data["available_in_pos"] = self._to_bool(product.get("available_in_pos"), default=True)
+            if self.supports_product_template_field("active"):
+                update_data["active"] = self._to_bool(product.get("active"), default=True)
 
             product_central_id = product.get("product_central_id", "")
             if product_central_id and self.supports_product_central_id_field():
@@ -461,8 +497,12 @@ class OdooReceiver:
             product_name = product.get("name", "")
 
             if action == "created":
-                # Create new product in Odoo
-                self.create_product(product)
+                # Idempotent create: if already exists, apply update instead of creating duplicate.
+                odoo_product_id = self.find_product_in_odoo(product_central_id, product_name)
+                if odoo_product_id:
+                    self.update_product(odoo_product_id, product)
+                else:
+                    self.create_product(product)
 
             elif action == "updated":
                 # Find and update existing product
