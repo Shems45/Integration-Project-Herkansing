@@ -168,6 +168,24 @@ class OdooReceiver:
                     )
                     return product_ids[0]
 
+            # Fallback when central ID was stored only in internal reference.
+            if product_central_id:
+                product_ids = models.execute_kw(
+                    ODOO_DB,
+                    uid,
+                    ODOO_PASSWORD,
+                    "product.template",
+                    "search",
+                    [[("default_code", "=", product_central_id)]],
+                )
+
+                if product_ids:
+                    logger.info(
+                        f"✓ Found product by default_code central ID: {product_central_id} "
+                        f"(Odoo ID: {product_ids[0]})"
+                    )
+                    return product_ids[0]
+
             # Backward-compatible fallback for older records
             if wordpress_id:
                 product_ids = models.execute_kw(
@@ -217,6 +235,101 @@ class OdooReceiver:
             raise Exception("Failed to authenticate with Odoo")
         return uid
 
+    def _safe_float(self, value: str, default: float = 0.0) -> float:
+        """Parse a numeric string to float, accepting comma decimals."""
+        try:
+            if isinstance(value, str):
+                value = value.replace(",", ".")
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _safe_int(self, value: str, default: int = 0) -> int:
+        """Parse numeric string to int via float fallback."""
+        try:
+            if isinstance(value, str):
+                value = value.replace(",", ".")
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+    def set_on_hand_quantity(self, product_template_id: int, quantity: int) -> None:
+        """Set on-hand inventory in an internal location for product variant."""
+        try:
+            uid = self._authenticate_odoo()
+            models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
+
+            product_variant_ids = models.execute_kw(
+                ODOO_DB,
+                uid,
+                ODOO_PASSWORD,
+                "product.product",
+                "search",
+                [[("product_tmpl_id", "=", product_template_id)]],
+                {"limit": 1},
+            )
+            if not product_variant_ids:
+                return
+
+            internal_location_ids = models.execute_kw(
+                ODOO_DB,
+                uid,
+                ODOO_PASSWORD,
+                "stock.location",
+                "search",
+                [[("usage", "=", "internal")]],
+                {"limit": 1},
+            )
+            if not internal_location_ids:
+                return
+
+            quant_ids = models.execute_kw(
+                ODOO_DB,
+                uid,
+                ODOO_PASSWORD,
+                "stock.quant",
+                "search",
+                [[
+                    ("product_id", "=", product_variant_ids[0]),
+                    ("location_id", "=", internal_location_ids[0]),
+                ]],
+                {"limit": 1},
+            )
+
+            if quant_ids:
+                models.execute_kw(
+                    ODOO_DB,
+                    uid,
+                    ODOO_PASSWORD,
+                    "stock.quant",
+                    "write",
+                    [[quant_ids[0]], {
+                        "quantity": quantity,
+                        "inventory_quantity": quantity,
+                    }],
+                )
+            else:
+                models.execute_kw(
+                    ODOO_DB,
+                    uid,
+                    ODOO_PASSWORD,
+                    "stock.quant",
+                    "create",
+                    [{
+                        "product_id": product_variant_ids[0],
+                        "location_id": internal_location_ids[0],
+                        "quantity": quantity,
+                        "inventory_quantity": quantity,
+                    }],
+                )
+
+            logger.info(
+                f"✓ Updated on-hand quantity to {quantity} "
+                f"(Odoo template ID: {product_template_id})"
+            )
+        except Exception as e:
+            logger.warning(f"Could not update on-hand quantity: {e}")
+
     def create_product(self, product: Dict[str, str]) -> Optional[int]:
         """Create a new product in Odoo with product_central_id stored in DB."""
         try:
@@ -230,11 +343,13 @@ class OdooReceiver:
             product_data = {
                 "name": product.get("name", "Unknown Product"),
                 "type": "product",  # Standard product type
-                "list_price": float(product.get("price", 0)) or 0.0,
+                "list_price": self._safe_float(product.get("price", 0), 0.0),
                 "description": product.get("description", ""),
                 "available_in_pos": True,  # Make available in POS
-                # Keep legacy fallback for older matching flows.
-                "default_code": f"WP-{wordpress_id}" if wordpress_id else "",
+                # Show shared product ID in POS/product code.
+                "default_code": product_central_id if product_central_id else (
+                    f"WP-{wordpress_id}" if wordpress_id else ""
+                ),
             }
 
             if product_central_id and self.supports_product_central_id_field():
@@ -255,6 +370,11 @@ class OdooReceiver:
                 f"Product Central ID: {product_central_id}, "
                 f"code: {product_data['default_code']})"
             )
+
+            self.set_on_hand_quantity(
+                product_id,
+                self._safe_int(product.get("quantity", 0), 0),
+            )
             return product_id
 
         except Exception as e:
@@ -272,13 +392,14 @@ class OdooReceiver:
             # Prepare update data
             update_data = {
                 "name": product.get("name", ""),
-                "list_price": float(product.get("price", 0)) or 0.0,
+                "list_price": self._safe_float(product.get("price", 0), 0.0),
                 "description": product.get("description", ""),
             }
 
             product_central_id = product.get("product_central_id", "")
             if product_central_id and self.supports_product_central_id_field():
                 update_data["product_central_id"] = product_central_id
+                update_data["default_code"] = product_central_id
 
             models.execute_kw(
                 ODOO_DB,
@@ -293,6 +414,11 @@ class OdooReceiver:
                 f"✓ Updated product in Odoo: {product['name']} "
                 f"(Odoo ID: {odoo_product_id}, WordPress ID: {product.get('id')}, "
                 f"Product Central ID: {product.get('product_central_id')})"
+            )
+
+            self.set_on_hand_quantity(
+                odoo_product_id,
+                self._safe_int(product.get("quantity", 0), 0),
             )
             return True
 

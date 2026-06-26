@@ -16,7 +16,7 @@ function integration_product_sync_table_name()
     return $wpdb->prefix . 'integration_products';
 }
 
-function integration_product_sync_activate()
+function integration_product_sync_create_or_update_table()
 {
     global $wpdb;
 
@@ -40,10 +40,65 @@ function integration_product_sync_activate()
     ) {$charset_collate};";
 
     dbDelta($sql);
+}
 
+function integration_product_sync_activate()
+{
+    integration_product_sync_create_or_update_table();
+
+    integration_product_sync_ensure_schema();
     integration_product_sync_backfill_product_central_ids();
 }
 register_activation_hook(__FILE__, 'integration_product_sync_activate');
+
+function integration_product_sync_ensure_schema()
+{
+    global $wpdb;
+
+    $table_name = integration_product_sync_table_name();
+    $table_exists = $wpdb->get_var(
+        $wpdb->prepare('SHOW TABLES LIKE %s', $table_name)
+    );
+
+    if ($table_exists !== $table_name) {
+        integration_product_sync_create_or_update_table();
+        return;
+    }
+
+    $columns = $wpdb->get_col("SHOW COLUMNS FROM {$table_name}", 0);
+    if (!in_array('product_central_id', $columns, true)) {
+        $wpdb->query(
+            "ALTER TABLE {$table_name} ADD COLUMN product_central_id VARCHAR(36) NULL AFTER id"
+        );
+    }
+
+    if (in_array('central_id', $columns, true)) {
+        // Migrate legacy IDs once, then remove old column.
+        $wpdb->query(
+            "UPDATE {$table_name} SET product_central_id = central_id "
+            . "WHERE (product_central_id IS NULL OR product_central_id = '') "
+            . "AND central_id IS NOT NULL AND central_id <> ''"
+        );
+
+        $legacy_index = $wpdb->get_var(
+            "SHOW INDEX FROM {$table_name} WHERE Key_name = 'central_id'"
+        );
+        if ($legacy_index) {
+            $wpdb->query("ALTER TABLE {$table_name} DROP INDEX central_id");
+        }
+
+        $wpdb->query("ALTER TABLE {$table_name} DROP COLUMN central_id");
+    }
+
+    $central_index = $wpdb->get_var(
+        "SHOW INDEX FROM {$table_name} WHERE Key_name = 'product_central_id'"
+    );
+    if (!$central_index) {
+        $wpdb->query(
+            "ALTER TABLE {$table_name} ADD UNIQUE KEY product_central_id (product_central_id)"
+        );
+    }
+}
 
 function integration_product_sync_generate_product_central_id()
 {
@@ -97,7 +152,7 @@ function integration_product_sync_send_event_to_wp_sender($action, $product_id, 
     );
 
     // Flow: WordPress hook -> wp_sender -> XML -> RabbitMQ topic exchange -> queue for Odoo receiver.
-    wp_remote_post(
+    $response = wp_remote_post(
         $endpoint,
         array(
             'timeout' => 5,
@@ -105,23 +160,40 @@ function integration_product_sync_send_event_to_wp_sender($action, $product_id, 
             'body' => wp_json_encode($payload),
         )
     );
+
+    if (is_wp_error($response)) {
+        return array(
+            'ok' => false,
+            'error' => $response->get_error_message(),
+        );
+    }
+
+    $status = (int) wp_remote_retrieve_response_code($response);
+    if ($status < 200 || $status >= 300) {
+        return array(
+            'ok' => false,
+            'error' => 'wp_sender HTTP ' . $status,
+        );
+    }
+
+    return array('ok' => true, 'error' => '');
 }
 
 function integration_product_sync_on_created($product_id, $product_data)
 {
-    integration_product_sync_send_event_to_wp_sender('created', $product_id, $product_data);
+    // Legacy hook kept for compatibility. Sync is executed directly in action handler.
 }
 add_action('integration_product_created', 'integration_product_sync_on_created', 10, 2);
 
 function integration_product_sync_on_updated($product_id, $product_data)
 {
-    integration_product_sync_send_event_to_wp_sender('updated', $product_id, $product_data);
+    // Legacy hook kept for compatibility. Sync is executed directly in action handler.
 }
 add_action('integration_product_updated', 'integration_product_sync_on_updated', 10, 2);
 
 function integration_product_sync_on_deleted($product_id, $product_data)
 {
-    integration_product_sync_send_event_to_wp_sender('deleted', $product_id, $product_data);
+    // Legacy hook kept for compatibility. Sync is executed directly in action handler.
 }
 add_action('integration_product_deleted', 'integration_product_sync_on_deleted', 10, 2);
 
@@ -167,6 +239,7 @@ function integration_product_sync_handle_actions()
 
     global $wpdb;
     $table_name = integration_product_sync_table_name();
+    integration_product_sync_ensure_schema();
 
     $action = sanitize_text_field(wp_unslash($_POST['integration_action']));
 
@@ -191,10 +264,16 @@ function integration_product_sync_handle_actions()
             array('%s', '%s', '%f', '%d', '%s', '%s')
         );
 
-        $product_id = (int) $wpdb->insert_id;
+        if ($wpdb->last_error !== '') {
+            integration_product_sync_redirect_with_message('Create failed.');
+        }
 
-        // Internal hook is handled below and forwarded to the wp_sender service.
-        do_action('integration_product_created', $product_id, array(
+        $product_id = (int) $wpdb->insert_id;
+        if ($product_id <= 0) {
+            integration_product_sync_redirect_with_message('Create failed.');
+        }
+
+        $event_payload = array(
             'id' => $product_id,
             'product_central_id' => $product_central_id,
             'name' => $name,
@@ -202,18 +281,56 @@ function integration_product_sync_handle_actions()
             'quantity' => $quantity,
             'description' => $description,
             'sync_status' => $sync_status,
-        ));
+        );
+
+        $sync_result = integration_product_sync_send_event_to_wp_sender(
+            'created',
+            $product_id,
+            $event_payload
+        );
+
+        if (!$sync_result['ok']) {
+            $wpdb->update(
+                $table_name,
+                array('sync_status' => 'sync_failed'),
+                array('id' => $product_id),
+                array('%s'),
+                array('%d')
+            );
+
+            integration_product_sync_redirect_with_message(
+                'Product created locally, but sync failed: ' . $sync_result['error']
+            );
+        }
+
+        // Keep hooks for compatibility.
+        do_action('integration_product_created', $product_id, $event_payload);
+
+        $wpdb->update(
+            $table_name,
+            array('sync_status' => 'synced'),
+            array('id' => $product_id),
+            array('%s'),
+            array('%d')
+        );
 
         integration_product_sync_redirect_with_message('Product created.');
     }
 
     if ($action === 'update') {
         $id = (int) sanitize_text_field(wp_unslash($_POST['id'] ?? '0'));
+        if ($id <= 0) {
+            integration_product_sync_redirect_with_message('Update failed. Invalid product ID.');
+        }
 
         $existing_product = $wpdb->get_row(
-            $wpdb->prepare("SELECT product_central_id FROM {$table_name} WHERE id = %d", $id),
+            $wpdb->prepare("SELECT id, product_central_id FROM {$table_name} WHERE id = %d", $id),
             ARRAY_A
         );
+
+        if (!$existing_product) {
+            integration_product_sync_redirect_with_message('Update failed. Product not found.');
+        }
 
         $product_central_id = isset($existing_product['product_central_id'])
             ? (string) $existing_product['product_central_id']
@@ -228,7 +345,7 @@ function integration_product_sync_handle_actions()
         $description = sanitize_text_field(wp_unslash($_POST['description'] ?? ''));
         $sync_status = sanitize_text_field(wp_unslash($_POST['sync_status'] ?? 'pending'));
 
-        $wpdb->update(
+        $result = $wpdb->update(
             $table_name,
             array(
                 'product_central_id' => $product_central_id,
@@ -243,8 +360,11 @@ function integration_product_sync_handle_actions()
             array('%d')
         );
 
-        // Internal hook is handled below and forwarded to the wp_sender service.
-        do_action('integration_product_updated', $id, array(
+        if ($result === false || $wpdb->last_error !== '') {
+            integration_product_sync_redirect_with_message('Update failed.');
+        }
+
+        $event_payload = array(
             'id' => $id,
             'product_central_id' => $product_central_id,
             'name' => $name,
@@ -252,23 +372,59 @@ function integration_product_sync_handle_actions()
             'quantity' => $quantity,
             'description' => $description,
             'sync_status' => $sync_status,
-        ));
+        );
+
+        $sync_result = integration_product_sync_send_event_to_wp_sender(
+            'updated',
+            $id,
+            $event_payload
+        );
+
+        if (!$sync_result['ok']) {
+            $wpdb->update(
+                $table_name,
+                array('sync_status' => 'sync_failed'),
+                array('id' => $id),
+                array('%s'),
+                array('%d')
+            );
+
+            integration_product_sync_redirect_with_message(
+                'Product updated locally, but sync failed: ' . $sync_result['error']
+            );
+        }
+
+        // Keep hooks for compatibility.
+        do_action('integration_product_updated', $id, $event_payload);
+
+        $wpdb->update(
+            $table_name,
+            array('sync_status' => 'synced'),
+            array('id' => $id),
+            array('%s'),
+            array('%d')
+        );
 
         integration_product_sync_redirect_with_message('Product updated.');
     }
 
     if ($action === 'delete') {
         $id = (int) sanitize_text_field(wp_unslash($_POST['id'] ?? '0'));
+        if ($id <= 0) {
+            integration_product_sync_redirect_with_message('Delete failed. Invalid product ID.');
+        }
 
         $existing_product = $wpdb->get_row(
             $wpdb->prepare("SELECT * FROM {$table_name} WHERE id = %d", $id),
             ARRAY_A
         );
 
-        $wpdb->delete($table_name, array('id' => $id), array('%d'));
+        $result = $wpdb->delete($table_name, array('id' => $id), array('%d'));
+        if ($result === false || $wpdb->last_error !== '') {
+            integration_product_sync_redirect_with_message('Delete failed.');
+        }
 
-        // Internal hook is handled below and forwarded to the wp_sender service.
-        do_action('integration_product_deleted', $id, array(
+        $event_payload = array(
             'id' => $id,
             'product_central_id' => isset($existing_product['product_central_id'])
                 ? $existing_product['product_central_id']
@@ -278,7 +434,22 @@ function integration_product_sync_handle_actions()
             'quantity' => isset($existing_product['quantity']) ? $existing_product['quantity'] : 0,
             'description' => isset($existing_product['description']) ? $existing_product['description'] : '',
             'sync_status' => isset($existing_product['sync_status']) ? $existing_product['sync_status'] : 'pending',
-        ));
+        );
+
+        $sync_result = integration_product_sync_send_event_to_wp_sender(
+            'deleted',
+            $id,
+            $event_payload
+        );
+
+        if (!$sync_result['ok']) {
+            integration_product_sync_redirect_with_message(
+                'Product deleted locally, but sync failed: ' . $sync_result['error']
+            );
+        }
+
+        // Keep hooks for compatibility.
+        do_action('integration_product_deleted', $id, $event_payload);
 
         integration_product_sync_redirect_with_message('Product deleted.');
     }
@@ -287,6 +458,7 @@ function integration_product_sync_handle_actions()
 function integration_product_sync_render_page()
 {
     integration_product_sync_handle_actions();
+    integration_product_sync_ensure_schema();
 
     if (!current_user_can('manage_options')) {
         wp_die(esc_html('You are not allowed to access this page.'));
