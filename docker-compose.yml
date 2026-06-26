@@ -98,6 +98,7 @@ services:
       - "8080:80"
     volumes:
       - wordpress-data:/var/www/html
+      - ./wordpress-plugin/product-sync:/var/www/html/wp-content/plugins/product-sync
     networks:
       - project-network
 

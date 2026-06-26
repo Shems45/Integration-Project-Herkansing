@@ -1,0 +1,292 @@
+<?php
+/**
+ * Plugin Name: Product Sync
+ * Description: Simple product management UI for the integration project.
+ * Version: 0.1.0
+ */
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+function integration_product_sync_table_name()
+{
+    global $wpdb;
+    return $wpdb->prefix . 'integration_products';
+}
+
+function integration_product_sync_activate()
+{
+    global $wpdb;
+
+    $table_name = integration_product_sync_table_name();
+    $charset_collate = $wpdb->get_charset_collate();
+
+    require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+
+    $sql = "CREATE TABLE {$table_name} (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        name VARCHAR(255) NOT NULL,
+        price DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+        quantity INT NOT NULL DEFAULT 0,
+        description TEXT NULL,
+        sync_status VARCHAR(50) NOT NULL DEFAULT 'pending',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id)
+    ) {$charset_collate};";
+
+    dbDelta($sql);
+}
+register_activation_hook(__FILE__, 'integration_product_sync_activate');
+
+function integration_product_sync_admin_menu()
+{
+    add_menu_page(
+        'Product Sync',
+        'Product Sync',
+        'manage_options',
+        'integration-product-sync',
+        'integration_product_sync_render_page',
+        'dashicons-products',
+        26
+    );
+}
+add_action('admin_menu', 'integration_product_sync_admin_menu');
+
+function integration_product_sync_redirect_with_message($message)
+{
+    $url = add_query_arg(
+        array(
+            'page' => 'integration-product-sync',
+            'message' => rawurlencode($message),
+        ),
+        admin_url('admin.php')
+    );
+
+    wp_redirect($url);
+    exit;
+}
+
+function integration_product_sync_handle_actions()
+{
+    if (!current_user_can('manage_options')) {
+        wp_die(esc_html('You are not allowed to access this page.'));
+    }
+
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !isset($_POST['integration_action'])) {
+        return;
+    }
+
+    check_admin_referer('integration_product_sync_action', 'integration_nonce');
+
+    global $wpdb;
+    $table_name = integration_product_sync_table_name();
+
+    $action = sanitize_text_field(wp_unslash($_POST['integration_action']));
+
+    if ($action === 'create') {
+        $name = sanitize_text_field(wp_unslash($_POST['name'] ?? ''));
+        $price = (float) sanitize_text_field(wp_unslash($_POST['price'] ?? '0'));
+        $quantity = (int) sanitize_text_field(wp_unslash($_POST['quantity'] ?? '0'));
+        $description = sanitize_text_field(wp_unslash($_POST['description'] ?? ''));
+        $sync_status = sanitize_text_field(wp_unslash($_POST['sync_status'] ?? 'pending'));
+
+        $wpdb->insert(
+            $table_name,
+            array(
+                'name' => $name,
+                'price' => $price,
+                'quantity' => $quantity,
+                'description' => $description,
+                'sync_status' => $sync_status,
+            ),
+            array('%s', '%f', '%d', '%s', '%s')
+        );
+
+        $product_id = (int) $wpdb->insert_id;
+
+        // Later this hook can be connected to the wp_sender service to publish events.
+        do_action('integration_product_created', $product_id, array(
+            'id' => $product_id,
+            'name' => $name,
+            'price' => $price,
+            'quantity' => $quantity,
+            'description' => $description,
+            'sync_status' => $sync_status,
+        ));
+
+        integration_product_sync_redirect_with_message('Product created.');
+    }
+
+    if ($action === 'update') {
+        $id = (int) sanitize_text_field(wp_unslash($_POST['id'] ?? '0'));
+        $name = sanitize_text_field(wp_unslash($_POST['name'] ?? ''));
+        $price = (float) sanitize_text_field(wp_unslash($_POST['price'] ?? '0'));
+        $quantity = (int) sanitize_text_field(wp_unslash($_POST['quantity'] ?? '0'));
+        $description = sanitize_text_field(wp_unslash($_POST['description'] ?? ''));
+        $sync_status = sanitize_text_field(wp_unslash($_POST['sync_status'] ?? 'pending'));
+
+        $wpdb->update(
+            $table_name,
+            array(
+                'name' => $name,
+                'price' => $price,
+                'quantity' => $quantity,
+                'description' => $description,
+                'sync_status' => $sync_status,
+            ),
+            array('id' => $id),
+            array('%s', '%f', '%d', '%s', '%s'),
+            array('%d')
+        );
+
+        // Later this hook can be connected to the wp_sender service to publish events.
+        do_action('integration_product_updated', $id, array(
+            'id' => $id,
+            'name' => $name,
+            'price' => $price,
+            'quantity' => $quantity,
+            'description' => $description,
+            'sync_status' => $sync_status,
+        ));
+
+        integration_product_sync_redirect_with_message('Product updated.');
+    }
+
+    if ($action === 'delete') {
+        $id = (int) sanitize_text_field(wp_unslash($_POST['id'] ?? '0'));
+
+        $wpdb->delete($table_name, array('id' => $id), array('%d'));
+
+        // Later this hook can be connected to the wp_sender service to publish events.
+        do_action('integration_product_deleted', $id);
+
+        integration_product_sync_redirect_with_message('Product deleted.');
+    }
+}
+
+function integration_product_sync_render_page()
+{
+    integration_product_sync_handle_actions();
+
+    if (!current_user_can('manage_options')) {
+        wp_die(esc_html('You are not allowed to access this page.'));
+    }
+
+    global $wpdb;
+    $table_name = integration_product_sync_table_name();
+
+    $edit_id = 0;
+    if (isset($_GET['action'], $_GET['id']) && $_GET['action'] === 'edit') {
+        $edit_id = (int) sanitize_text_field(wp_unslash($_GET['id']));
+    }
+
+    $editing_product = null;
+    if ($edit_id > 0) {
+        $editing_product = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table_name} WHERE id = %d", $edit_id));
+    }
+
+    $products = $wpdb->get_results("SELECT * FROM {$table_name} ORDER BY id DESC");
+
+    $message = '';
+    if (isset($_GET['message'])) {
+        $message = sanitize_text_field(wp_unslash($_GET['message']));
+    }
+    ?>
+    <div class="wrap">
+        <h1><?php echo esc_html('Product Sync'); ?></h1>
+
+        <?php if ($message !== '') : ?>
+            <div class="notice notice-success is-dismissible">
+                <p><?php echo esc_html($message); ?></p>
+            </div>
+        <?php endif; ?>
+
+        <h2><?php echo esc_html($editing_product ? 'Edit Product' : 'Create Product'); ?></h2>
+        <form method="post">
+            <?php wp_nonce_field('integration_product_sync_action', 'integration_nonce'); ?>
+            <input type="hidden" name="integration_action" value="<?php echo esc_attr($editing_product ? 'update' : 'create'); ?>" />
+            <?php if ($editing_product) : ?>
+                <input type="hidden" name="id" value="<?php echo esc_attr((string) $editing_product->id); ?>" />
+            <?php endif; ?>
+
+            <table class="form-table" role="presentation">
+                <tr>
+                    <th scope="row"><label for="name"><?php echo esc_html('Name'); ?></label></th>
+                    <td><input name="name" id="name" type="text" class="regular-text" required value="<?php echo esc_attr($editing_product ? $editing_product->name : ''); ?>" /></td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="price"><?php echo esc_html('Price'); ?></label></th>
+                    <td><input name="price" id="price" type="number" step="0.01" min="0" required value="<?php echo esc_attr($editing_product ? (string) $editing_product->price : '0.00'); ?>" /></td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="quantity"><?php echo esc_html('Quantity'); ?></label></th>
+                    <td><input name="quantity" id="quantity" type="number" min="0" required value="<?php echo esc_attr($editing_product ? (string) $editing_product->quantity : '0'); ?>" /></td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="description"><?php echo esc_html('Description'); ?></label></th>
+                    <td><input name="description" id="description" type="text" class="regular-text" value="<?php echo esc_attr($editing_product ? $editing_product->description : ''); ?>" /></td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="sync_status"><?php echo esc_html('Sync Status'); ?></label></th>
+                    <td><input name="sync_status" id="sync_status" type="text" class="regular-text" value="<?php echo esc_attr($editing_product ? $editing_product->sync_status : 'pending'); ?>" /></td>
+                </tr>
+            </table>
+
+            <?php submit_button($editing_product ? 'Update Product' : 'Create Product'); ?>
+        </form>
+
+        <hr />
+
+        <h2><?php echo esc_html('Product Overview'); ?></h2>
+        <table class="widefat fixed striped">
+            <thead>
+                <tr>
+                    <th><?php echo esc_html('ID'); ?></th>
+                    <th><?php echo esc_html('Name'); ?></th>
+                    <th><?php echo esc_html('Price'); ?></th>
+                    <th><?php echo esc_html('Quantity'); ?></th>
+                    <th><?php echo esc_html('Description'); ?></th>
+                    <th><?php echo esc_html('Sync Status'); ?></th>
+                    <th><?php echo esc_html('Created At'); ?></th>
+                    <th><?php echo esc_html('Updated At'); ?></th>
+                    <th><?php echo esc_html('Actions'); ?></th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if (empty($products)) : ?>
+                    <tr>
+                        <td colspan="9"><?php echo esc_html('No products found.'); ?></td>
+                    </tr>
+                <?php else : ?>
+                    <?php foreach ($products as $product) : ?>
+                        <tr>
+                            <td><?php echo esc_html((string) $product->id); ?></td>
+                            <td><?php echo esc_html($product->name); ?></td>
+                            <td><?php echo esc_html((string) $product->price); ?></td>
+                            <td><?php echo esc_html((string) $product->quantity); ?></td>
+                            <td><?php echo esc_html($product->description); ?></td>
+                            <td><?php echo esc_html($product->sync_status); ?></td>
+                            <td><?php echo esc_html($product->created_at); ?></td>
+                            <td><?php echo esc_html($product->updated_at); ?></td>
+                            <td>
+                                <a href="<?php echo esc_attr(add_query_arg(array('page' => 'integration-product-sync', 'action' => 'edit', 'id' => (int) $product->id), admin_url('admin.php'))); ?>">
+                                    <?php echo esc_html('Edit'); ?>
+                                </a>
+                                |
+                                <form method="post" style="display:inline;">
+                                    <?php wp_nonce_field('integration_product_sync_action', 'integration_nonce'); ?>
+                                    <input type="hidden" name="integration_action" value="delete" />
+                                    <input type="hidden" name="id" value="<?php echo esc_attr((string) $product->id); ?>" />
+                                    <button type="submit" class="button-link-delete"><?php echo esc_html('Delete'); ?></button>
+                                </form>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </tbody>
+        </table>
+    </div>
+    <?php
+}
