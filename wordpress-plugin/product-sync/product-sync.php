@@ -125,11 +125,39 @@ function integration_product_sync_ensure_schema()
 
 function integration_product_sync_generate_product_central_id()
 {
-    if (function_exists('wp_generate_uuid4')) {
-        return wp_generate_uuid4();
+    global $wpdb;
+
+    $table_name = integration_product_sync_table_name();
+    $existing_ids = $wpdb->get_col(
+        $wpdb->prepare(
+            "SELECT product_central_id FROM {$table_name} WHERE product_central_id LIKE %s",
+            'PROD-%'
+        )
+    );
+
+    $max_sequence = 0;
+    foreach ((array) $existing_ids as $existing_id) {
+        if (preg_match('/^PROD-(\d+)$/', (string) $existing_id, $matches)) {
+            $max_sequence = max($max_sequence, (int) $matches[1]);
+        }
     }
 
-    return uniqid('central-', true);
+    $next_sequence = $max_sequence + 1;
+    while (true) {
+        $candidate = sprintf('PROD-%06d', $next_sequence);
+        $already_exists = (int) $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT COUNT(1) FROM {$table_name} WHERE product_central_id = %s",
+                $candidate
+            )
+        );
+
+        if ($already_exists === 0) {
+            return $candidate;
+        }
+
+        $next_sequence++;
+    }
 }
 
 function integration_product_sync_backfill_product_central_ids()

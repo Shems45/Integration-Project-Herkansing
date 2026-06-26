@@ -16,6 +16,13 @@ NUMERIC_ONLY_RE = re.compile(r"^\d+$")
 class ProductTemplate(models.Model):
     _inherit = "product.template"
 
+    def name_get(self):
+        """Show Odoo template ID in UI labels instead of central sync code in brackets."""
+        result = []
+        for template in self:
+            result.append((template.id, f"[{template.id}] {template.name or ''}"))
+        return result
+
     def _generate_product_central_id(self):
         """Generate product_central_id from sequence; never from Odoo product.id."""
         return self.env["ir.sequence"].next_by_code("product.central.id") or False
