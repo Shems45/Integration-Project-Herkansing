@@ -32,6 +32,8 @@ function integration_product_sync_create_or_update_table()
         price DECIMAL(10,2) NOT NULL DEFAULT 0.00,
         quantity INT NOT NULL DEFAULT 0,
         description TEXT NULL,
+        available_in_pos TINYINT(1) NOT NULL DEFAULT 1,
+        active TINYINT(1) NOT NULL DEFAULT 1,
         sync_status VARCHAR(50) NOT NULL DEFAULT 'pending',
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -78,6 +80,18 @@ function integration_product_sync_ensure_schema()
     if (!in_array('product_central_id', $columns, true)) {
         $wpdb->query(
             "ALTER TABLE {$table_name} ADD COLUMN product_central_id VARCHAR(36) NULL AFTER id"
+        );
+    }
+
+    if (!in_array('available_in_pos', $columns, true)) {
+        $wpdb->query(
+            "ALTER TABLE {$table_name} ADD COLUMN available_in_pos TINYINT(1) NOT NULL DEFAULT 1 AFTER description"
+        );
+    }
+
+    if (!in_array('active', $columns, true)) {
+        $wpdb->query(
+            "ALTER TABLE {$table_name} ADD COLUMN active TINYINT(1) NOT NULL DEFAULT 1 AFTER available_in_pos"
         );
     }
 
@@ -163,6 +177,8 @@ function integration_product_sync_send_event_to_wp_sender($action, $product_id, 
         'price' => isset($product_data['price']) ? (float) $product_data['price'] : 0,
         'quantity' => isset($product_data['quantity']) ? (int) $product_data['quantity'] : 0,
         'description' => isset($product_data['description']) ? sanitize_text_field((string) $product_data['description']) : '',
+        'available_in_pos' => !empty($product_data['available_in_pos']),
+        'active' => !empty($product_data['active']),
     );
 
     // Flow: WordPress hook -> wp_sender -> XML -> RabbitMQ topic exchange -> queue for Odoo receiver.
@@ -378,7 +394,7 @@ function integration_product_sync_get_products()
 function integration_product_sync_render_products_tbody_rows($products)
 {
     if (empty($products)) {
-        echo '<tr><td colspan="9">' . esc_html('No products found.') . '</td></tr>';
+        echo '<tr><td colspan="11">' . esc_html('No products found.') . '</td></tr>';
         return;
     }
 
@@ -389,6 +405,8 @@ function integration_product_sync_render_products_tbody_rows($products)
         echo '<td>' . esc_html((string) $product->price) . '</td>';
         echo '<td>' . esc_html((string) $product->quantity) . '</td>';
         echo '<td>' . esc_html($product->description) . '</td>';
+        echo '<td>' . esc_html(!empty($product->available_in_pos) ? 'true' : 'false') . '</td>';
+        echo '<td>' . esc_html(!empty($product->active) ? 'true' : 'false') . '</td>';
         echo '<td>' . esc_html($product->sync_status) . '</td>';
         echo '<td>' . esc_html($product->created_at) . '</td>';
         echo '<td>' . esc_html($product->updated_at) . '</td>';
@@ -401,6 +419,9 @@ function integration_product_sync_render_products_tbody_rows($products)
         echo ' data-price="' . esc_attr((string) $product->price) . '"';
         echo ' data-quantity="' . esc_attr((string) $product->quantity) . '"';
         echo ' data-description="' . esc_attr($product->description) . '"';
+        echo ' data-product_central_id="' . esc_attr(isset($product->product_central_id) ? (string) $product->product_central_id : '') . '"';
+        echo ' data-available_in_pos="' . esc_attr(!empty($product->available_in_pos) ? '1' : '0') . '"';
+        echo ' data-active="' . esc_attr(!empty($product->active) ? '1' : '0') . '"';
         echo ' data-sync_status="' . esc_attr($product->sync_status) . '">';
         echo esc_html('Edit');
         echo '</a> | ';
@@ -451,7 +472,9 @@ function integration_product_sync_handle_ajax_action()
         $price = (float) sanitize_text_field(wp_unslash($_POST['price'] ?? '0'));
         $quantity = (int) sanitize_text_field(wp_unslash($_POST['quantity'] ?? '0'));
         $description = sanitize_text_field(wp_unslash($_POST['description'] ?? ''));
-        $sync_status = sanitize_text_field(wp_unslash($_POST['sync_status'] ?? 'pending'));
+        $available_in_pos = !empty(wp_unslash($_POST['available_in_pos'] ?? '')) ? 1 : 0;
+        $active = !empty(wp_unslash($_POST['active'] ?? '')) ? 1 : 0;
+        $sync_status = 'pending';
 
         $wpdb->insert(
             $table_name,
@@ -461,9 +484,11 @@ function integration_product_sync_handle_ajax_action()
                 'price' => $price,
                 'quantity' => $quantity,
                 'description' => $description,
+                'available_in_pos' => $available_in_pos,
+                'active' => $active,
                 'sync_status' => $sync_status,
             ),
-            array('%s', '%s', '%f', '%d', '%s', '%s')
+            array('%s', '%s', '%f', '%d', '%s', '%d', '%d', '%s')
         );
 
         if ($wpdb->last_error !== '') {
@@ -482,6 +507,8 @@ function integration_product_sync_handle_ajax_action()
             'price' => $price,
             'quantity' => $quantity,
             'description' => $description,
+            'available_in_pos' => (bool) $available_in_pos,
+            'active' => (bool) $active,
             'sync_status' => $sync_status,
         );
 
@@ -537,7 +564,9 @@ function integration_product_sync_handle_ajax_action()
         $price = (float) sanitize_text_field(wp_unslash($_POST['price'] ?? '0'));
         $quantity = (int) sanitize_text_field(wp_unslash($_POST['quantity'] ?? '0'));
         $description = sanitize_text_field(wp_unslash($_POST['description'] ?? ''));
-        $sync_status = sanitize_text_field(wp_unslash($_POST['sync_status'] ?? 'pending'));
+        $available_in_pos = !empty(wp_unslash($_POST['available_in_pos'] ?? '')) ? 1 : 0;
+        $active = !empty(wp_unslash($_POST['active'] ?? '')) ? 1 : 0;
+        $sync_status = 'pending';
 
         $result = $wpdb->update(
             $table_name,
@@ -547,10 +576,12 @@ function integration_product_sync_handle_ajax_action()
                 'price' => $price,
                 'quantity' => $quantity,
                 'description' => $description,
+                'available_in_pos' => $available_in_pos,
+                'active' => $active,
                 'sync_status' => $sync_status,
             ),
             array('id' => $id),
-            array('%s', '%s', '%f', '%d', '%s', '%s'),
+            array('%s', '%s', '%f', '%d', '%s', '%d', '%d', '%s'),
             array('%d')
         );
 
@@ -565,6 +596,8 @@ function integration_product_sync_handle_ajax_action()
             'price' => $price,
             'quantity' => $quantity,
             'description' => $description,
+            'available_in_pos' => (bool) $available_in_pos,
+            'active' => (bool) $active,
             'sync_status' => $sync_status,
         );
 
@@ -714,7 +747,9 @@ function integration_product_sync_handle_actions()
         $price = (float) sanitize_text_field(wp_unslash($_POST['price'] ?? '0'));
         $quantity = (int) sanitize_text_field(wp_unslash($_POST['quantity'] ?? '0'));
         $description = sanitize_text_field(wp_unslash($_POST['description'] ?? ''));
-        $sync_status = sanitize_text_field(wp_unslash($_POST['sync_status'] ?? 'pending'));
+        $available_in_pos = !empty(wp_unslash($_POST['available_in_pos'] ?? '')) ? 1 : 0;
+        $active = !empty(wp_unslash($_POST['active'] ?? '')) ? 1 : 0;
+        $sync_status = 'pending';
 
         $wpdb->insert(
             $table_name,
@@ -724,9 +759,11 @@ function integration_product_sync_handle_actions()
                 'price' => $price,
                 'quantity' => $quantity,
                 'description' => $description,
+                'available_in_pos' => $available_in_pos,
+                'active' => $active,
                 'sync_status' => $sync_status,
             ),
-            array('%s', '%s', '%f', '%d', '%s', '%s')
+            array('%s', '%s', '%f', '%d', '%s', '%d', '%d', '%s')
         );
 
         if ($wpdb->last_error !== '') {
@@ -745,6 +782,8 @@ function integration_product_sync_handle_actions()
             'price' => $price,
             'quantity' => $quantity,
             'description' => $description,
+            'available_in_pos' => (bool) $available_in_pos,
+            'active' => (bool) $active,
             'sync_status' => $sync_status,
         );
 
@@ -808,7 +847,9 @@ function integration_product_sync_handle_actions()
         $price = (float) sanitize_text_field(wp_unslash($_POST['price'] ?? '0'));
         $quantity = (int) sanitize_text_field(wp_unslash($_POST['quantity'] ?? '0'));
         $description = sanitize_text_field(wp_unslash($_POST['description'] ?? ''));
-        $sync_status = sanitize_text_field(wp_unslash($_POST['sync_status'] ?? 'pending'));
+        $available_in_pos = !empty(wp_unslash($_POST['available_in_pos'] ?? '')) ? 1 : 0;
+        $active = !empty(wp_unslash($_POST['active'] ?? '')) ? 1 : 0;
+        $sync_status = 'pending';
 
         $result = $wpdb->update(
             $table_name,
@@ -818,10 +859,12 @@ function integration_product_sync_handle_actions()
                 'price' => $price,
                 'quantity' => $quantity,
                 'description' => $description,
+                'available_in_pos' => $available_in_pos,
+                'active' => $active,
                 'sync_status' => $sync_status,
             ),
             array('id' => $id),
-            array('%s', '%s', '%f', '%d', '%s', '%s'),
+            array('%s', '%s', '%f', '%d', '%s', '%d', '%d', '%s'),
             array('%d')
         );
 
@@ -836,6 +879,8 @@ function integration_product_sync_handle_actions()
             'price' => $price,
             'quantity' => $quantity,
             'description' => $description,
+            'available_in_pos' => (bool) $available_in_pos,
+            'active' => (bool) $active,
             'sync_status' => $sync_status,
         );
 
@@ -973,6 +1018,13 @@ function integration_product_sync_render_page()
 
             <table class="form-table" role="presentation">
                 <tr>
+                    <th scope="row"><label for="product_central_id"><?php echo esc_html('Product Central ID'); ?></label></th>
+                    <td>
+                        <input name="product_central_id" id="product_central_id" type="text" class="regular-text" readonly value="<?php echo esc_attr($editing_product && isset($editing_product->product_central_id) ? (string) $editing_product->product_central_id : 'Auto generated'); ?>" />
+                        <p class="description"><?php echo esc_html('Generated automatically and used as the only sync identifier.'); ?></p>
+                    </td>
+                </tr>
+                <tr>
                     <th scope="row"><label for="name"><?php echo esc_html('Name'); ?></label></th>
                     <td><input name="name" id="name" type="text" class="regular-text" required value="<?php echo esc_attr($editing_product ? $editing_product->name : ''); ?>" /></td>
                 </tr>
@@ -989,8 +1041,12 @@ function integration_product_sync_render_page()
                     <td><input name="description" id="description" type="text" class="regular-text" value="<?php echo esc_attr($editing_product ? $editing_product->description : ''); ?>" /></td>
                 </tr>
                 <tr>
-                    <th scope="row"><label for="sync_status"><?php echo esc_html('Sync Status'); ?></label></th>
-                    <td><input name="sync_status" id="sync_status" type="text" class="regular-text" value="<?php echo esc_attr($editing_product ? $editing_product->sync_status : 'pending'); ?>" /></td>
+                    <th scope="row"><?php echo esc_html('Available In POS'); ?></th>
+                    <td><label><input name="available_in_pos" id="available_in_pos" type="checkbox" value="1" <?php checked(!$editing_product || !isset($editing_product->available_in_pos) || (int) $editing_product->available_in_pos === 1); ?> /> <?php echo esc_html('true'); ?></label></td>
+                </tr>
+                <tr>
+                    <th scope="row"><?php echo esc_html('Active'); ?></th>
+                    <td><label><input name="active" id="active" type="checkbox" value="1" <?php checked(!$editing_product || !isset($editing_product->active) || (int) $editing_product->active === 1); ?> /> <?php echo esc_html('true'); ?></label></td>
                 </tr>
             </table>
 
@@ -1008,6 +1064,8 @@ function integration_product_sync_render_page()
                     <th><?php echo esc_html('Price'); ?></th>
                     <th><?php echo esc_html('Quantity'); ?></th>
                     <th><?php echo esc_html('Description'); ?></th>
+                    <th><?php echo esc_html('Available In POS'); ?></th>
+                    <th><?php echo esc_html('Active'); ?></th>
                     <th><?php echo esc_html('Sync Status'); ?></th>
                     <th><?php echo esc_html('Created At'); ?></th>
                     <th><?php echo esc_html('Updated At'); ?></th>
@@ -1050,6 +1108,18 @@ function integration_product_sync_render_page()
                 form.reset();
                 actionInput.value = 'create';
                 idInput.value = '';
+                const centralIdInput = form.querySelector('[name="product_central_id"]');
+                if (centralIdInput) {
+                    centralIdInput.value = 'Auto generated';
+                }
+                const availableInPos = form.querySelector('[name="available_in_pos"]');
+                const active = form.querySelector('[name="active"]');
+                if (availableInPos) {
+                    availableInPos.checked = true;
+                }
+                if (active) {
+                    active.checked = true;
+                }
                 if (submitButton) {
                     submitButton.textContent = 'Create Product';
                 }
@@ -1064,7 +1134,7 @@ function integration_product_sync_render_page()
                     price: 'price',
                     quantity: 'quantity',
                     description: 'description',
-                    sync_status: 'sync_status'
+                    product_central_id: 'product_central_id'
                 };
 
                 Object.keys(map).forEach((key) => {
@@ -1073,6 +1143,15 @@ function integration_product_sync_render_page()
                         input.value = data[key] || '';
                     }
                 });
+
+                const availableInPos = form.querySelector('[name="available_in_pos"]');
+                const active = form.querySelector('[name="active"]');
+                if (availableInPos) {
+                    availableInPos.checked = (data.available_in_pos || '1') === '1';
+                }
+                if (active) {
+                    active.checked = (data.active || '1') === '1';
+                }
 
                 if (submitButton) {
                     submitButton.textContent = 'Update Product';

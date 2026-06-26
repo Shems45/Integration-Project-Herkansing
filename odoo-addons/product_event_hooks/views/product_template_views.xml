@@ -7,6 +7,10 @@
         <field name="arch" type="xml">
             <xpath expr="//field[@name='default_code']" position="attributes">
                 <attribute name="readonly">1</attribute>
+                <attribute name="string">Product Central ID</attribute>
+            </xpath>
+            <xpath expr="//field[@name='default_code']" position="after">
+                <field name="active"/>
             </xpath>
         </field>
     </record>
