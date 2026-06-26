@@ -146,6 +146,11 @@ function integration_product_sync_backfill_product_central_ids()
 
 function integration_product_sync_send_event_to_wp_sender($action, $product_id, $product_data = array())
 {
+    // Prevent infinite loop when updates originate from integration receiver flow.
+    if (!empty($product_data['skip_sync'])) {
+        return array('ok' => true, 'error' => '');
+    }
+
     $endpoint = 'http://wp_sender:8000/product-event';
 
     $payload = array(
@@ -187,6 +192,181 @@ function integration_product_sync_send_event_to_wp_sender($action, $product_id, 
 
     return array('ok' => true, 'error' => '');
 }
+
+function integration_product_sync_expected_token()
+{
+    $token = getenv('WORDPRESS_SYNC_TOKEN');
+    if (is_string($token) && $token !== '') {
+        return $token;
+    }
+
+    return 'school-project-token';
+}
+
+function integration_product_sync_get_table_columns($table_name)
+{
+    global $wpdb;
+    $columns = $wpdb->get_col("SHOW COLUMNS FROM {$table_name}", 0);
+    if (!is_array($columns)) {
+        return array();
+    }
+
+    return $columns;
+}
+
+function integration_product_sync_apply_odoo_event($payload)
+{
+    global $wpdb;
+
+    integration_product_sync_ensure_schema();
+    $table_name = integration_product_sync_table_name();
+    $columns = integration_product_sync_get_table_columns($table_name);
+
+    $action = sanitize_text_field(strtolower((string) ($payload['action'] ?? '')));
+    $product_central_id = sanitize_text_field((string) ($payload['product_central_id'] ?? ''));
+
+    if ($product_central_id === '') {
+        return new WP_Error('missing_product_central_id', 'product_central_id is required', array('status' => 400));
+    }
+
+    if (!in_array($action, array('created', 'updated', 'deleted'), true)) {
+        return new WP_Error('invalid_action', 'Invalid action. Use created, updated, or deleted.', array('status' => 400));
+    }
+
+    $existing_product = $wpdb->get_row(
+        $wpdb->prepare("SELECT * FROM {$table_name} WHERE product_central_id = %s", $product_central_id),
+        ARRAY_A
+    );
+
+    $name = sanitize_text_field((string) ($payload['name'] ?? ''));
+    // Prices are treated as EUR and stored as decimal values without euro symbol.
+    $price = (float) $payload['price'];
+    $quantity = (int) round((float) $payload['quantity']);
+    $description = sanitize_text_field((string) ($payload['description'] ?? ''));
+    $available_in_pos = !empty($payload['available_in_pos']) ? 1 : 0;
+    $active = !empty($payload['active']) ? 1 : 0;
+
+    $supports_active = in_array('active', $columns, true);
+    $supports_available_in_pos = in_array('available_in_pos', $columns, true);
+
+    if ($action === 'created' || $action === 'updated') {
+        $data = array(
+            'product_central_id' => $product_central_id,
+            'name' => $name,
+            'price' => $price,
+            'quantity' => $quantity,
+            'description' => $description,
+            'sync_status' => 'synced_from_odoo',
+        );
+        $formats = array('%s', '%s', '%f', '%d', '%s', '%s');
+
+        if ($supports_available_in_pos) {
+            $data['available_in_pos'] = $available_in_pos;
+            $formats[] = '%d';
+        }
+
+        if ($supports_active) {
+            $data['active'] = $active;
+            $formats[] = '%d';
+        }
+
+        if ($existing_product) {
+            $result = $wpdb->update(
+                $table_name,
+                $data,
+                array('id' => (int) $existing_product['id']),
+                $formats,
+                array('%d')
+            );
+
+            if ($result === false || $wpdb->last_error !== '') {
+                return new WP_Error('db_update_failed', 'Failed to update product from Odoo', array('status' => 500));
+            }
+
+            error_log('product-sync: updated product from odoo product_central_id=' . $product_central_id);
+            return array('status' => 'updated', 'product_id' => (int) $existing_product['id']);
+        }
+
+        $wpdb->insert($table_name, $data, $formats);
+        if ($wpdb->last_error !== '' || (int) $wpdb->insert_id <= 0) {
+            return new WP_Error('db_insert_failed', 'Failed to create product from Odoo', array('status' => 500));
+        }
+
+        error_log('product-sync: created product from odoo product_central_id=' . $product_central_id);
+        return array('status' => 'created', 'product_id' => (int) $wpdb->insert_id);
+    }
+
+    // deleted
+    if (!$existing_product) {
+        error_log('product-sync: delete noop, product not found for product_central_id=' . $product_central_id);
+        return array('status' => 'not_found', 'product_id' => 0);
+    }
+
+    if ($supports_active) {
+        $result = $wpdb->update(
+            $table_name,
+            array(
+                'active' => 0,
+                'sync_status' => 'deleted_from_odoo',
+            ),
+            array('id' => (int) $existing_product['id']),
+            array('%d', '%s'),
+            array('%d')
+        );
+
+        if ($result === false || $wpdb->last_error !== '') {
+            return new WP_Error('db_soft_delete_failed', 'Failed to mark product as deleted from Odoo', array('status' => 500));
+        }
+
+        error_log('product-sync: soft deleted product from odoo product_central_id=' . $product_central_id);
+        return array('status' => 'soft_deleted', 'product_id' => (int) $existing_product['id']);
+    }
+
+    $result = $wpdb->delete($table_name, array('id' => (int) $existing_product['id']), array('%d'));
+    if ($result === false || $wpdb->last_error !== '') {
+        return new WP_Error('db_delete_failed', 'Failed to delete product from Odoo', array('status' => 500));
+    }
+
+    error_log('product-sync: hard deleted product from odoo product_central_id=' . $product_central_id);
+    return array('status' => 'deleted', 'product_id' => (int) $existing_product['id']);
+}
+
+function integration_product_sync_rest_odoo_product_event($request)
+{
+    $token = (string) $request->get_header('X-Product-Sync-Token');
+    if ($token !== integration_product_sync_expected_token()) {
+        return new WP_Error('forbidden', 'Invalid sync token', array('status' => 403));
+    }
+
+    $params = $request->get_json_params();
+    if (!is_array($params)) {
+        return new WP_Error('invalid_payload', 'Invalid JSON payload', array('status' => 400));
+    }
+
+    $result = integration_product_sync_apply_odoo_event($params);
+    if (is_wp_error($result)) {
+        return $result;
+    }
+
+    return rest_ensure_response(array(
+        'ok' => true,
+        'result' => $result,
+    ));
+}
+
+function integration_product_sync_register_rest_routes()
+{
+    register_rest_route(
+        'product-sync/v1',
+        '/odoo-product-event',
+        array(
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => 'integration_product_sync_rest_odoo_product_event',
+            'permission_callback' => '__return_true',
+        )
+    );
+}
+add_action('rest_api_init', 'integration_product_sync_register_rest_routes');
 
 function integration_product_sync_get_products()
 {

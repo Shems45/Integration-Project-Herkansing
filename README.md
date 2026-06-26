@@ -75,6 +75,27 @@ Currency rule:
 - Prices are sent with `currency="EUR"` in XML.
 - Set your Odoo company currency to EUR in the Odoo UI.
 
+## WordPress Receiver Flow
+
+Incoming Odoo XML messages for WordPress follow this path:
+
+1. RabbitMQ queue `wordpress.product.events`
+2. `wp_receiver` service consumes XML messages
+3. `wp_receiver` parses XML `productEvent`
+4. `wp_receiver` sends JSON to WordPress plugin endpoint:
+	`/wp-json/product-sync/v1/odoo-product-event`
+5. WordPress plugin updates product table by `product_central_id`
+
+Security:
+
+- `wp_receiver` sends header `X-Product-Sync-Token`.
+- WordPress validates token before applying create, update, or delete.
+
+Loop prevention:
+
+- Odoo-origin updates are applied directly in WordPress table through the REST endpoint.
+- These integration updates skip outbound sync to `wp_sender`, preventing ping-pong loops.
+
 Main ports:
 
 - WordPress: `8080`
