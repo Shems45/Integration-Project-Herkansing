@@ -165,3 +165,14 @@ class ProductTemplate(models.Model):
         self._ensure_product_central_id()
         self._send_event_to_odoo_sender("deleted")
         return super().unlink()
+
+
+class ProductProduct(models.Model):
+    _inherit = "product.product"
+
+    def name_get(self):
+        """Show Odoo ID in UI labels instead of central sync code in brackets."""
+        result = []
+        for product in self:
+            result.append((product.id, f"[{product.id}] {product.name or ''}"))
+        return result
