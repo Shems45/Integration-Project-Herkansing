@@ -23,7 +23,7 @@ services:
       - project-network
 
   odoo-init:
-    # One-time init creates the real Odoo database and installs base.
+    # One-time init creates the real Odoo database and installs base and point_of_sale.
     image: odoo:17.0
     container_name: odoo-init
     depends_on:
@@ -33,7 +33,7 @@ services:
       HOST: odoo-db
       USER: odoo
       PASSWORD: odoo
-    command: ["odoo", "-d", "odoo", "-i", "base", "--without-demo=all", "--stop-after-init"]
+    command: ["odoo", "-d", "odoo", "-i", "base,point_of_sale", "--without-demo=all", "--stop-after-init"]
     volumes:
       - odoo-data:/var/lib/odoo
     restart: "no"
@@ -135,6 +135,31 @@ services:
       RABBITMQ_QUEUE: odoo.product.events
     expose:
       - "8000"
+    networks:
+      - project-network
+
+  odoo_receiver:
+    # Consumes product events from RabbitMQ and updates Odoo via XML-RPC API.
+    # Flow: RabbitMQ queue odoo.product.events -> parse XML -> Odoo API -> create/update/delete product
+    build: ./services/odoo_receiver
+    container_name: odoo_receiver
+    depends_on:
+      rabbitmq:
+        condition: service_started
+      odoo:
+        condition: service_started
+    environment:
+      # RabbitMQ connection settings
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: admin
+      RABBITMQ_PASSWORD: admin
+      RABBITMQ_QUEUE: odoo.product.events
+      # Odoo connection settings (XML-RPC API)
+      ODOO_URL: http://odoo:8069
+      ODOO_DB: odoo
+      ODOO_USERNAME: admin
+      ODOO_PASSWORD: admin
     networks:
       - project-network
 
