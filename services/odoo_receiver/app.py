@@ -367,11 +367,16 @@ class OdooReceiver:
             # Prepare product data for Odoo
             product_data = {
                 "name": product.get("name", "Unknown Product"),
-                "type": "product",  # Standard product type
                 "list_price": self._safe_float(product.get("price", 0), 0.0),
                 # Keep shared sync identifier in default_code.
                 "default_code": product_central_id,
             }
+
+            # Odoo 17 uses detailed_type; fallback to type for compatibility.
+            if self.supports_product_template_field("detailed_type"):
+                product_data["detailed_type"] = "product"
+            elif self.supports_product_template_field("type"):
+                product_data["type"] = "product"
 
             description = product.get("description", "")
             if self.supports_product_template_field("description"):
@@ -426,6 +431,12 @@ class OdooReceiver:
                 "name": product.get("name", ""),
                 "list_price": self._safe_float(product.get("price", 0), 0.0),
             }
+
+            # Products synced from WordPress should remain stockable; otherwise qty stays 0 for consu/service.
+            if self.supports_product_template_field("detailed_type"):
+                update_data["detailed_type"] = "product"
+            elif self.supports_product_template_field("type"):
+                update_data["type"] = "product"
 
             description = product.get("description", "")
             if self.supports_product_template_field("description"):
