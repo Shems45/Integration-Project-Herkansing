@@ -38,3 +38,20 @@ Run it from the project root with:
 ```bash
 docker compose up -d
 ```
+
+## Docker Compose Stack
+
+The local stack runs on one Linux VM and includes:
+
+- Odoo with a PostgreSQL database
+- WordPress with a MySQL database
+- RabbitMQ with the management UI enabled
+
+All services share one Docker network and use volumes for persistent data.
+
+Main ports:
+
+- WordPress: `8080`
+- Odoo: `8069`
+- RabbitMQ AMQP: `5672`
+- RabbitMQ Management UI: `15672`

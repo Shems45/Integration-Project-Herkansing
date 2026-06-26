@@ -1,5 +1,8 @@
+# Simple local stack for the integration project.
+# All services run on one shared Docker network.
 services:
   odoo-db:
+    # PostgreSQL database used by Odoo.
     image: postgres:16
     container_name: odoo-db
     environment:
@@ -12,6 +15,7 @@ services:
       - project-network
 
   odoo:
+    # Odoo application service.
     image: odoo:17.0
     container_name: odoo
     depends_on:
@@ -28,6 +32,7 @@ services:
       - project-network
 
   wordpress-db:
+    # MySQL database used by WordPress.
     image: mysql:8.0
     container_name: wordpress-db
     environment:
@@ -41,6 +46,7 @@ services:
       - project-network
 
   wordpress:
+    # WordPress application service.
     image: wordpress:6.5-apache
     container_name: wordpress
     depends_on:
@@ -58,6 +64,7 @@ services:
       - project-network
 
   rabbitmq:
+    # RabbitMQ broker with the management UI enabled.
     image: rabbitmq:3-management
     container_name: rabbitmq
     environment:
@@ -71,6 +78,7 @@ services:
     networks:
       - project-network
 
+# Persistent data for databases and application files.
 volumes:
   odoo-db-data:
   odoo-data:
@@ -78,6 +86,7 @@ volumes:
   wordpress-data:
   rabbitmq-data:
 
+# One shared bridge network for service-to-service communication.
 networks:
   project-network:
     driver: bridge
