@@ -11,6 +11,13 @@ services:
       POSTGRES_PASSWORD: Admin
     volumes:
       - odoo-db-data:/var/lib/postgresql/data
+    # Healthcheck ensures Odoo starts only after PostgreSQL is ready.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U Admin -d odoo"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     networks:
       - project-network
 
@@ -19,7 +26,8 @@ services:
     image: odoo:17.0
     container_name: odoo
     depends_on:
-      - odoo-db
+      odoo-db:
+        condition: service_healthy
     environment:
       HOST: odoo-db
       USER: Admin
@@ -42,6 +50,13 @@ services:
       MYSQL_ROOT_PASSWORD: Admin
     volumes:
       - wordpress-db-data:/var/lib/mysql
+    # Healthcheck ensures WordPress starts only after MySQL is ready.
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uAdmin -pAdmin --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
     networks:
       - project-network
 
@@ -50,7 +65,8 @@ services:
     image: wordpress:6.5-apache
     container_name: wordpress
     depends_on:
-      - wordpress-db
+      wordpress-db:
+        condition: service_healthy
     environment:
       WORDPRESS_DB_HOST: wordpress-db:3306
       WORDPRESS_DB_USER: Admin
