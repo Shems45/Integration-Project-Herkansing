@@ -467,32 +467,33 @@ function integration_product_sync_handle_actions()
 
 function integration_product_sync_render_page()
 {
-    integration_product_sync_handle_actions();
-    integration_product_sync_ensure_schema();
+    try {
+        integration_product_sync_handle_actions();
+        integration_product_sync_ensure_schema();
 
-    if (!current_user_can('manage_options')) {
-        wp_die(esc_html('You are not allowed to access this page.'));
-    }
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html('You are not allowed to access this page.'));
+        }
 
-    global $wpdb;
-    $table_name = integration_product_sync_table_name();
+        global $wpdb;
+        $table_name = integration_product_sync_table_name();
 
-    $edit_id = 0;
-    if (isset($_GET['action'], $_GET['id']) && $_GET['action'] === 'edit') {
-        $edit_id = (int) sanitize_text_field(wp_unslash($_GET['id']));
-    }
+        $edit_id = 0;
+        if (isset($_GET['action'], $_GET['id']) && $_GET['action'] === 'edit') {
+            $edit_id = (int) sanitize_text_field(wp_unslash($_GET['id']));
+        }
 
-    $editing_product = null;
-    if ($edit_id > 0) {
-        $editing_product = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table_name} WHERE id = %d", $edit_id));
-    }
+        $editing_product = null;
+        if ($edit_id > 0) {
+            $editing_product = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table_name} WHERE id = %d", $edit_id));
+        }
 
-    $products = $wpdb->get_results("SELECT * FROM {$table_name} ORDER BY id DESC");
+        $products = $wpdb->get_results("SELECT * FROM {$table_name} ORDER BY id DESC");
 
-    $message = '';
-    if (isset($_GET['message'])) {
-        $message = sanitize_text_field(wp_unslash($_GET['message']));
-    }
+        $message = '';
+        if (isset($_GET['message'])) {
+            $message = sanitize_text_field(wp_unslash($_GET['message']));
+        }
 ?>
     <div class="wrap">
         <h1><?php echo esc_html('Product Sync'); ?></h1>
@@ -589,4 +590,10 @@ function integration_product_sync_render_page()
         </table>
     </div>
 <?php
+    } catch (Throwable $e) {
+        echo '<div class="wrap"><h1>Product Sync</h1>';
+        echo '<div class="notice notice-error"><p>';
+        echo esc_html('Product Sync encountered an error: ' . $e->getMessage());
+        echo '</p></div></div>';
+    }
 }
