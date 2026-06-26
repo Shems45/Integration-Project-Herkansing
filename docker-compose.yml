@@ -6,14 +6,15 @@ services:
     image: postgres:16
     container_name: odoo-db
     environment:
-      POSTGRES_DB: odoo
-      POSTGRES_USER: Admin
-      POSTGRES_PASSWORD: Admin
+      # Keep default database as postgres; Odoo database is initialized separately.
+      POSTGRES_DB: postgres
+      POSTGRES_USER: odoo
+      POSTGRES_PASSWORD: odoo
     volumes:
       - odoo-db-data:/var/lib/postgresql/data
     # Healthcheck ensures Odoo starts only after PostgreSQL is ready.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U Admin -d odoo"]
+      test: ["CMD-SHELL", "pg_isready -U odoo -d postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -21,17 +22,38 @@ services:
     networks:
       - project-network
 
-  odoo:
-    # Odoo application service.
+  odoo-init:
+    # One-time init creates the real Odoo database and installs base.
     image: odoo:17.0
-    container_name: odoo
+    container_name: odoo-init
     depends_on:
       odoo-db:
         condition: service_healthy
     environment:
       HOST: odoo-db
-      USER: Admin
-      PASSWORD: Admin
+      USER: odoo
+      PASSWORD: odoo
+    command: ["odoo", "-d", "odoo", "-i", "base", "--without-demo=all", "--stop-after-init"]
+    volumes:
+      - odoo-data:/var/lib/odoo
+    restart: "no"
+    networks:
+      - project-network
+
+  odoo:
+    # Odoo application service.
+    image: odoo:17.0
+    container_name: odoo
+    # Wait for DB health and one-time init to prevent empty/broken DB startup.
+    depends_on:
+      odoo-db:
+        condition: service_healthy
+      odoo-init:
+        condition: service_completed_successfully
+    environment:
+      HOST: odoo-db
+      USER: odoo
+      PASSWORD: odoo
     ports:
       - "8069:8069"
     volumes:
@@ -45,14 +67,14 @@ services:
     container_name: wordpress-db
     environment:
       MYSQL_DATABASE: wordpress
-      MYSQL_USER: Admin
-      MYSQL_PASSWORD: Admin
-      MYSQL_ROOT_PASSWORD: Admin
+      MYSQL_USER: wordpress
+      MYSQL_PASSWORD: wordpress
+      MYSQL_ROOT_PASSWORD: wordpress
     volumes:
       - wordpress-db-data:/var/lib/mysql
     # Healthcheck ensures WordPress starts only after MySQL is ready.
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uAdmin -pAdmin --silent"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uwordpress -pwordpress --silent"]
       interval: 10s
       timeout: 5s
       retries: 8
@@ -69,8 +91,8 @@ services:
         condition: service_healthy
     environment:
       WORDPRESS_DB_HOST: wordpress-db:3306
-      WORDPRESS_DB_USER: Admin
-      WORDPRESS_DB_PASSWORD: Admin
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wordpress
       WORDPRESS_DB_NAME: wordpress
     ports:
       - "8080:80"
@@ -84,8 +106,8 @@ services:
     image: rabbitmq:3-management
     container_name: rabbitmq
     environment:
-      RABBITMQ_DEFAULT_USER: Admin
-      RABBITMQ_DEFAULT_PASS: Admin
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin
     ports:
       - "5672:5672"
       - "15672:15672"
