@@ -188,6 +188,273 @@ function integration_product_sync_send_event_to_wp_sender($action, $product_id, 
     return array('ok' => true, 'error' => '');
 }
 
+function integration_product_sync_get_products()
+{
+    global $wpdb;
+    $table_name = integration_product_sync_table_name();
+    return $wpdb->get_results("SELECT * FROM {$table_name} ORDER BY id DESC");
+}
+
+function integration_product_sync_render_products_tbody_rows($products)
+{
+    if (empty($products)) {
+        echo '<tr><td colspan="9">' . esc_html('No products found.') . '</td></tr>';
+        return;
+    }
+
+    foreach ($products as $product) {
+        echo '<tr>';
+        echo '<td>' . esc_html((string) $product->id) . '</td>';
+        echo '<td>' . esc_html($product->name) . '</td>';
+        echo '<td>' . esc_html((string) $product->price) . '</td>';
+        echo '<td>' . esc_html((string) $product->quantity) . '</td>';
+        echo '<td>' . esc_html($product->description) . '</td>';
+        echo '<td>' . esc_html($product->sync_status) . '</td>';
+        echo '<td>' . esc_html($product->created_at) . '</td>';
+        echo '<td>' . esc_html($product->updated_at) . '</td>';
+        echo '<td>';
+
+        echo '<a href="' . esc_attr(add_query_arg(array('page' => 'integration-product-sync', 'action' => 'edit', 'id' => (int) $product->id), admin_url('admin.php'))) . '"';
+        echo ' class="integration-edit-link"';
+        echo ' data-id="' . esc_attr((string) $product->id) . '"';
+        echo ' data-name="' . esc_attr($product->name) . '"';
+        echo ' data-price="' . esc_attr((string) $product->price) . '"';
+        echo ' data-quantity="' . esc_attr((string) $product->quantity) . '"';
+        echo ' data-description="' . esc_attr($product->description) . '"';
+        echo ' data-sync_status="' . esc_attr($product->sync_status) . '">';
+        echo esc_html('Edit');
+        echo '</a> | ';
+
+        echo '<form method="post" class="integration-delete-form" style="display:inline;">';
+        wp_nonce_field('integration_product_sync_action', 'integration_nonce');
+        echo '<input type="hidden" name="integration_action" value="delete" />';
+        echo '<input type="hidden" name="id" value="' . esc_attr((string) $product->id) . '" />';
+        echo '<button type="submit" class="button-link-delete">' . esc_html('Delete') . '</button>';
+        echo '</form>';
+
+        echo '</td>';
+        echo '</tr>';
+    }
+}
+
+function integration_product_sync_ajax_response($ok, $message)
+{
+    $products = integration_product_sync_get_products();
+    ob_start();
+    integration_product_sync_render_products_tbody_rows($products);
+    $rows_html = ob_get_clean();
+
+    wp_send_json(array(
+        'ok' => (bool) $ok,
+        'message' => (string) $message,
+        'rows_html' => (string) $rows_html,
+    ));
+}
+
+function integration_product_sync_handle_ajax_action()
+{
+    if (!current_user_can('manage_options')) {
+        wp_send_json(array('ok' => false, 'message' => 'Forbidden'), 403);
+    }
+
+    check_ajax_referer('integration_product_sync_action', 'integration_nonce');
+
+    global $wpdb;
+    $table_name = integration_product_sync_table_name();
+    integration_product_sync_ensure_schema();
+
+    $action = sanitize_text_field(wp_unslash($_POST['integration_action'] ?? ''));
+
+    if ($action === 'create') {
+        $product_central_id = integration_product_sync_generate_product_central_id();
+        $name = sanitize_text_field(wp_unslash($_POST['name'] ?? ''));
+        $price = (float) sanitize_text_field(wp_unslash($_POST['price'] ?? '0'));
+        $quantity = (int) sanitize_text_field(wp_unslash($_POST['quantity'] ?? '0'));
+        $description = sanitize_text_field(wp_unslash($_POST['description'] ?? ''));
+        $sync_status = sanitize_text_field(wp_unslash($_POST['sync_status'] ?? 'pending'));
+
+        $wpdb->insert(
+            $table_name,
+            array(
+                'product_central_id' => $product_central_id,
+                'name' => $name,
+                'price' => $price,
+                'quantity' => $quantity,
+                'description' => $description,
+                'sync_status' => $sync_status,
+            ),
+            array('%s', '%s', '%f', '%d', '%s', '%s')
+        );
+
+        if ($wpdb->last_error !== '') {
+            integration_product_sync_ajax_response(false, 'Create failed.');
+        }
+
+        $product_id = (int) $wpdb->insert_id;
+        if ($product_id <= 0) {
+            integration_product_sync_ajax_response(false, 'Create failed.');
+        }
+
+        $event_payload = array(
+            'id' => $product_id,
+            'product_central_id' => $product_central_id,
+            'name' => $name,
+            'price' => $price,
+            'quantity' => $quantity,
+            'description' => $description,
+            'sync_status' => $sync_status,
+        );
+
+        $sync_result = integration_product_sync_send_event_to_wp_sender('created', $product_id, $event_payload);
+        if (!$sync_result['ok']) {
+            $wpdb->update(
+                $table_name,
+                array('sync_status' => 'sync_failed'),
+                array('id' => $product_id),
+                array('%s'),
+                array('%d')
+            );
+
+            integration_product_sync_ajax_response(false, 'Product created locally, but sync failed: ' . $sync_result['error']);
+        }
+
+        do_action('integration_product_created', $product_id, $event_payload);
+
+        $wpdb->update(
+            $table_name,
+            array('sync_status' => 'synced'),
+            array('id' => $product_id),
+            array('%s'),
+            array('%d')
+        );
+
+        integration_product_sync_ajax_response(true, 'Product created.');
+    }
+
+    if ($action === 'update') {
+        $id = (int) sanitize_text_field(wp_unslash($_POST['id'] ?? '0'));
+        if ($id <= 0) {
+            integration_product_sync_ajax_response(false, 'Update failed. Invalid product ID.');
+        }
+
+        $existing_product = $wpdb->get_row(
+            $wpdb->prepare("SELECT id, product_central_id FROM {$table_name} WHERE id = %d", $id),
+            ARRAY_A
+        );
+
+        if (!$existing_product) {
+            integration_product_sync_ajax_response(false, 'Update failed. Product not found.');
+        }
+
+        $product_central_id = isset($existing_product['product_central_id'])
+            ? (string) $existing_product['product_central_id']
+            : '';
+        if ($product_central_id === '') {
+            $product_central_id = integration_product_sync_generate_product_central_id();
+        }
+
+        $name = sanitize_text_field(wp_unslash($_POST['name'] ?? ''));
+        $price = (float) sanitize_text_field(wp_unslash($_POST['price'] ?? '0'));
+        $quantity = (int) sanitize_text_field(wp_unslash($_POST['quantity'] ?? '0'));
+        $description = sanitize_text_field(wp_unslash($_POST['description'] ?? ''));
+        $sync_status = sanitize_text_field(wp_unslash($_POST['sync_status'] ?? 'pending'));
+
+        $result = $wpdb->update(
+            $table_name,
+            array(
+                'product_central_id' => $product_central_id,
+                'name' => $name,
+                'price' => $price,
+                'quantity' => $quantity,
+                'description' => $description,
+                'sync_status' => $sync_status,
+            ),
+            array('id' => $id),
+            array('%s', '%s', '%f', '%d', '%s', '%s'),
+            array('%d')
+        );
+
+        if ($result === false || $wpdb->last_error !== '') {
+            integration_product_sync_ajax_response(false, 'Update failed.');
+        }
+
+        $event_payload = array(
+            'id' => $id,
+            'product_central_id' => $product_central_id,
+            'name' => $name,
+            'price' => $price,
+            'quantity' => $quantity,
+            'description' => $description,
+            'sync_status' => $sync_status,
+        );
+
+        $sync_result = integration_product_sync_send_event_to_wp_sender('updated', $id, $event_payload);
+        if (!$sync_result['ok']) {
+            $wpdb->update(
+                $table_name,
+                array('sync_status' => 'sync_failed'),
+                array('id' => $id),
+                array('%s'),
+                array('%d')
+            );
+
+            integration_product_sync_ajax_response(false, 'Product updated locally, but sync failed: ' . $sync_result['error']);
+        }
+
+        do_action('integration_product_updated', $id, $event_payload);
+
+        $wpdb->update(
+            $table_name,
+            array('sync_status' => 'synced'),
+            array('id' => $id),
+            array('%s'),
+            array('%d')
+        );
+
+        integration_product_sync_ajax_response(true, 'Product updated.');
+    }
+
+    if ($action === 'delete') {
+        $id = (int) sanitize_text_field(wp_unslash($_POST['id'] ?? '0'));
+        if ($id <= 0) {
+            integration_product_sync_ajax_response(false, 'Delete failed. Invalid product ID.');
+        }
+
+        $existing_product = $wpdb->get_row(
+            $wpdb->prepare("SELECT * FROM {$table_name} WHERE id = %d", $id),
+            ARRAY_A
+        );
+
+        $result = $wpdb->delete($table_name, array('id' => $id), array('%d'));
+        if ($result === false || $wpdb->last_error !== '') {
+            integration_product_sync_ajax_response(false, 'Delete failed.');
+        }
+
+        $event_payload = array(
+            'id' => $id,
+            'product_central_id' => isset($existing_product['product_central_id'])
+                ? $existing_product['product_central_id']
+                : '',
+            'name' => isset($existing_product['name']) ? $existing_product['name'] : '',
+            'price' => isset($existing_product['price']) ? $existing_product['price'] : 0,
+            'quantity' => isset($existing_product['quantity']) ? $existing_product['quantity'] : 0,
+            'description' => isset($existing_product['description']) ? $existing_product['description'] : '',
+            'sync_status' => isset($existing_product['sync_status']) ? $existing_product['sync_status'] : 'pending',
+        );
+
+        $sync_result = integration_product_sync_send_event_to_wp_sender('deleted', $id, $event_payload);
+        if (!$sync_result['ok']) {
+            integration_product_sync_ajax_response(false, 'Product deleted locally, but sync failed: ' . $sync_result['error']);
+        }
+
+        do_action('integration_product_deleted', $id, $event_payload);
+        integration_product_sync_ajax_response(true, 'Product deleted.');
+    }
+
+    integration_product_sync_ajax_response(false, 'Unknown action.');
+}
+add_action('wp_ajax_integration_product_sync_ajax_action', 'integration_product_sync_handle_ajax_action');
+
 function integration_product_sync_on_created($product_id, $product_data)
 {
     // Legacy hook kept for compatibility. Sync is executed directly in action handler.
@@ -231,12 +498,20 @@ function integration_product_sync_redirect_with_message($message)
         admin_url('admin.php')
     );
 
-    wp_redirect($url);
+    wp_safe_redirect($url);
     exit;
 }
 
 function integration_product_sync_handle_actions()
 {
+    if (!is_admin()) {
+        return;
+    }
+
+    if (!isset($_GET['page']) || wp_unslash($_GET['page']) !== 'integration-product-sync') {
+        return;
+    }
+
     if (!current_user_can('manage_options')) {
         wp_die(esc_html('You are not allowed to access this page.'));
     }
@@ -464,11 +739,11 @@ function integration_product_sync_handle_actions()
         integration_product_sync_redirect_with_message('Product deleted.');
     }
 }
+add_action('admin_init', 'integration_product_sync_handle_actions');
 
 function integration_product_sync_render_page()
 {
     try {
-        integration_product_sync_handle_actions();
         integration_product_sync_ensure_schema();
 
         if (!current_user_can('manage_options')) {
@@ -488,7 +763,7 @@ function integration_product_sync_render_page()
             $editing_product = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table_name} WHERE id = %d", $edit_id));
         }
 
-        $products = $wpdb->get_results("SELECT * FROM {$table_name} ORDER BY id DESC");
+        $products = integration_product_sync_get_products();
 
         $message = '';
         if (isset($_GET['message'])) {
@@ -499,17 +774,21 @@ function integration_product_sync_render_page()
         <h1><?php echo esc_html('Product Sync'); ?></h1>
 
         <?php if ($message !== '') : ?>
-            <div class="notice notice-success is-dismissible">
+            <div id="integration-product-sync-notice" class="notice notice-success is-dismissible">
                 <p><?php echo esc_html($message); ?></p>
             </div>
+        <?php else : ?>
+            <div id="integration-product-sync-notice" class="notice" style="display:none;"><p></p></div>
         <?php endif; ?>
 
         <h2><?php echo esc_html($editing_product ? 'Edit Product' : 'Create Product'); ?></h2>
-        <form method="post">
+        <form method="post" id="integration-product-form">
             <?php wp_nonce_field('integration_product_sync_action', 'integration_nonce'); ?>
-            <input type="hidden" name="integration_action" value="<?php echo esc_attr($editing_product ? 'update' : 'create'); ?>" />
+            <input type="hidden" id="integration_action" name="integration_action" value="<?php echo esc_attr($editing_product ? 'update' : 'create'); ?>" />
             <?php if ($editing_product) : ?>
-                <input type="hidden" name="id" value="<?php echo esc_attr((string) $editing_product->id); ?>" />
+                <input type="hidden" id="integration_product_id" name="id" value="<?php echo esc_attr((string) $editing_product->id); ?>" />
+            <?php else : ?>
+                <input type="hidden" id="integration_product_id" name="id" value="" />
             <?php endif; ?>
 
             <table class="form-table" role="presentation">
@@ -555,40 +834,132 @@ function integration_product_sync_render_page()
                     <th><?php echo esc_html('Actions'); ?></th>
                 </tr>
             </thead>
-            <tbody>
-                <?php if (empty($products)) : ?>
-                    <tr>
-                        <td colspan="9"><?php echo esc_html('No products found.'); ?></td>
-                    </tr>
-                <?php else : ?>
-                    <?php foreach ($products as $product) : ?>
-                        <tr>
-                            <td><?php echo esc_html((string) $product->id); ?></td>
-                            <td><?php echo esc_html($product->name); ?></td>
-                            <td><?php echo esc_html((string) $product->price); ?></td>
-                            <td><?php echo esc_html((string) $product->quantity); ?></td>
-                            <td><?php echo esc_html($product->description); ?></td>
-                            <td><?php echo esc_html($product->sync_status); ?></td>
-                            <td><?php echo esc_html($product->created_at); ?></td>
-                            <td><?php echo esc_html($product->updated_at); ?></td>
-                            <td>
-                                <a href="<?php echo esc_attr(add_query_arg(array('page' => 'integration-product-sync', 'action' => 'edit', 'id' => (int) $product->id), admin_url('admin.php'))); ?>">
-                                    <?php echo esc_html('Edit'); ?>
-                                </a>
-                                |
-                                <form method="post" style="display:inline;">
-                                    <?php wp_nonce_field('integration_product_sync_action', 'integration_nonce'); ?>
-                                    <input type="hidden" name="integration_action" value="delete" />
-                                    <input type="hidden" name="id" value="<?php echo esc_attr((string) $product->id); ?>" />
-                                    <button type="submit" class="button-link-delete"><?php echo esc_html('Delete'); ?></button>
-                                </form>
-                            </td>
-                        </tr>
-                    <?php endforeach; ?>
-                <?php endif; ?>
+            <tbody id="integration-products-tbody">
+                <?php integration_product_sync_render_products_tbody_rows($products); ?>
             </tbody>
         </table>
     </div>
+    <script>
+        (function () {
+            const form = document.getElementById('integration-product-form');
+            const tbody = document.getElementById('integration-products-tbody');
+            const notice = document.getElementById('integration-product-sync-notice');
+            const submitButton = form ? form.querySelector('button[type="submit"]') : null;
+            const actionInput = document.getElementById('integration_action');
+            const idInput = document.getElementById('integration_product_id');
+            const ajaxUrl = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
+
+            if (!form || !tbody) {
+                return;
+            }
+
+            function showNotice(message, ok) {
+                if (!notice) {
+                    return;
+                }
+
+                notice.style.display = 'block';
+                notice.className = 'notice ' + (ok ? 'notice-success' : 'notice-error') + ' is-dismissible';
+                const p = notice.querySelector('p');
+                if (p) {
+                    p.textContent = message;
+                }
+            }
+
+            function setCreateMode() {
+                form.reset();
+                actionInput.value = 'create';
+                idInput.value = '';
+                if (submitButton) {
+                    submitButton.textContent = 'Create Product';
+                }
+            }
+
+            function setEditMode(data) {
+                actionInput.value = 'update';
+                idInput.value = data.id || '';
+
+                const map = {
+                    name: 'name',
+                    price: 'price',
+                    quantity: 'quantity',
+                    description: 'description',
+                    sync_status: 'sync_status'
+                };
+
+                Object.keys(map).forEach((key) => {
+                    const input = form.querySelector('[name="' + map[key] + '"]');
+                    if (input) {
+                        input.value = data[key] || '';
+                    }
+                });
+
+                if (submitButton) {
+                    submitButton.textContent = 'Update Product';
+                }
+            }
+
+            async function postAjax(formData) {
+                formData.append('action', 'integration_product_sync_ajax_action');
+
+                const response = await fetch(ajaxUrl, {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    body: formData
+                });
+
+                const data = await response.json();
+                return data;
+            }
+
+            form.addEventListener('submit', async function (event) {
+                event.preventDefault();
+
+                const formData = new FormData(form);
+                const data = await postAjax(formData);
+
+                if (typeof data.rows_html === 'string') {
+                    tbody.innerHTML = data.rows_html;
+                }
+
+                showNotice(data.message || 'Done', !!data.ok);
+                if (data.ok) {
+                    setCreateMode();
+                }
+            });
+
+            tbody.addEventListener('click', function (event) {
+                const editLink = event.target.closest('.integration-edit-link');
+                if (!editLink) {
+                    return;
+                }
+
+                event.preventDefault();
+                setEditMode(editLink.dataset);
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            });
+
+            tbody.addEventListener('submit', async function (event) {
+                const deleteForm = event.target.closest('.integration-delete-form');
+                if (!deleteForm) {
+                    return;
+                }
+
+                event.preventDefault();
+                const formData = new FormData(deleteForm);
+                const data = await postAjax(formData);
+
+                if (typeof data.rows_html === 'string') {
+                    tbody.innerHTML = data.rows_html;
+                }
+
+                showNotice(data.message || 'Done', !!data.ok);
+                if (data.ok) {
+                    setCreateMode();
+                }
+            });
+        })();
+    </script>
 <?php
     } catch (Throwable $e) {
         echo '<div class="wrap"><h1>Product Sync</h1>';
