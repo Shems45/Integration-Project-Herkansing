@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified">
+  <xs:element name="productEvent">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="source">
+          <xs:simpleType>
+            <xs:restriction base="xs:string">
+              <xs:enumeration value="wordpress"/>
+              <xs:enumeration value="odoo"/>
+            </xs:restriction>
+          </xs:simpleType>
+        </xs:element>
+        <xs:element name="action">
+          <xs:simpleType>
+            <xs:restriction base="xs:string">
+              <xs:enumeration value="created"/>
+              <xs:enumeration value="updated"/>
+              <xs:enumeration value="deleted"/>
+            </xs:restriction>
+          </xs:simpleType>
+        </xs:element>
+        <xs:element name="product">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="productCentralId" type="xs:string"/>
+              <xs:element name="name" type="xs:string"/>
+              <xs:element name="price">
+                <xs:complexType>
+                  <xs:simpleContent>
+                    <xs:extension base="xs:decimal">
+                      <xs:attribute name="currency" use="required" fixed="EUR"/>
+                    </xs:extension>
+                  </xs:simpleContent>
+                </xs:complexType>
+              </xs:element>
+              <xs:element name="quantity" type="xs:decimal"/>
+              <xs:element name="description" type="xs:string"/>
+              <xs:element name="availableInPos" type="xs:boolean"/>
+              <xs:element name="active" type="xs:boolean"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

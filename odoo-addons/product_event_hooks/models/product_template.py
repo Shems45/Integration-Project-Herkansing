@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import re
 import urllib.error
 import urllib.request
@@ -10,11 +11,22 @@ from odoo.exceptions import ValidationError
 _logger = logging.getLogger(__name__)
 
 ODOO_SENDER_URL = "http://odoo_sender:8000/odoo-product-event"
+INTEGRATION_HTTP_TOKEN = os.getenv("INTEGRATION_HTTP_TOKEN", "school-project-token")
 NUMERIC_ONLY_RE = re.compile(r"^\d+$")
 
 
 class ProductTemplate(models.Model):
     _inherit = "product.template"
+
+    def init(self):
+        # Keep sequence configuration aligned with required ODOO- prefix.
+        self.env.cr.execute(
+            """
+            UPDATE ir_sequence
+            SET prefix = 'ODOO-', padding = 6
+            WHERE code = 'product.central.id'
+            """
+        )
 
     def name_get(self):
         """Show Odoo template ID in UI labels instead of central sync code in brackets."""
@@ -24,7 +36,17 @@ class ProductTemplate(models.Model):
         return result
 
     def _generate_product_central_id(self):
-        """Generate product_central_id from sequence; never from Odoo product.id."""
+        """Generate product_central_id via ir.sequence (concurrency-safe) and never from Odoo product.id."""
+        # ir.sequence guarantees atomic increments across concurrent create requests.
+        sequence = self.env["ir.sequence"].search([
+            ("code", "=", "product.central.id"),
+        ], limit=1)
+        if sequence and (sequence.prefix != "ODOO-" or int(sequence.padding or 0) != 6):
+            sequence.sudo().write({
+                "prefix": "ODOO-",
+                "padding": 6,
+            })
+
         return self.env["ir.sequence"].next_by_code("product.central.id") or False
 
     def _validate_product_central_id(self, code):
@@ -45,7 +67,7 @@ class ProductTemplate(models.Model):
         )
         if duplicate:
             raise ValidationError(
-                "product_central_id/default_code already exists for another product"
+                "Duplicate product_central_id/default_code detected. This sync identifier must be unique."
             )
 
     def _ensure_product_central_id(self):
@@ -99,7 +121,10 @@ class ProductTemplate(models.Model):
             req = urllib.request.Request(
                 ODOO_SENDER_URL,
                 data=request_data,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Integration-Token": INTEGRATION_HTTP_TOKEN,
+                },
                 method="POST",
             )
 

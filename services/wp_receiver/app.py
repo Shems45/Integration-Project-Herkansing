@@ -1,4 +1,6 @@
 import json
+import hmac
+import hashlib
 import logging
 import os
 import time
@@ -7,6 +9,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 import pika
+from lxml import etree
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,6 +31,14 @@ WORDPRESS_SYNC_ENDPOINT = os.getenv(
     "http://wordpress/wp-json/product-sync/v1/odoo-product-event",
 )
 WORDPRESS_SYNC_TOKEN = os.getenv("WORDPRESS_SYNC_TOKEN", "school-project-token")
+INTEGRATION_SECRET = os.getenv("INTEGRATION_SECRET", "change-me-school-secret")
+XSD_PATH = os.getenv("PRODUCT_EVENT_XSD_PATH", "/app/schemas/product_event.xsd")
+
+
+def load_xml_schema():
+    with open(XSD_PATH, "rb") as schema_file:
+        schema_doc = etree.parse(schema_file)
+    return etree.XMLSchema(schema_doc)
 
 
 class WordPressReceiver:
@@ -36,6 +47,7 @@ class WordPressReceiver:
     def __init__(self):
         self.connection = None
         self.channel = None
+        self.xml_schema = load_xml_schema()
 
     def connect(self):
         credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
@@ -159,6 +171,14 @@ class WordPressReceiver:
         logger.info("Received RabbitMQ message routing_key=%s", method.routing_key)
 
         try:
+            if not self.verify_signature(properties, body):
+                channel.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+                return
+
+            if not self.validate_xml_message(body):
+                channel.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+                return
+
             payload = self.parse_xml_message(body)
             self.send_to_wordpress(payload)
             channel.basic_ack(delivery_tag=method.delivery_tag)
@@ -171,6 +191,60 @@ class WordPressReceiver:
         except Exception as exc:
             logger.exception("Unexpected error while processing message: %s", exc)
             channel.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+
+    def _header_value(self, headers, key):
+        if not isinstance(headers, dict):
+            return ""
+
+        value = headers.get(key)
+        if value is None:
+            value = headers.get(key.encode("utf-8"))
+
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="ignore")
+
+        return "" if value is None else str(value)
+
+    def verify_signature(self, properties, body):
+        headers = getattr(properties, "headers", None) or {}
+        provided_signature = self._header_value(headers, "x-signature").strip()
+        source = self._header_value(headers, "x-source").strip().lower()
+        message_type = self._header_value(headers, "x-message-type").strip()
+
+        if not provided_signature:
+            logger.error("Security error: missing x-signature header")
+            return False
+
+        if message_type != "productEvent":
+            logger.error("Security error: invalid x-message-type header: %s", message_type)
+            return False
+
+        if source not in {"wordpress", "odoo"}:
+            logger.error("Security error: invalid x-source header: %s", source)
+            return False
+
+        expected_signature = hmac.new(
+            INTEGRATION_SECRET.encode("utf-8"),
+            body,
+            hashlib.sha256,
+        ).hexdigest()
+
+        if not hmac.compare_digest(provided_signature, expected_signature):
+            logger.error("HMAC signature invalid")
+            return False
+
+        logger.info("HMAC signature verified")
+        return True
+
+    def validate_xml_message(self, body):
+        try:
+            xml_doc = etree.fromstring(body)
+            self.xml_schema.assertValid(xml_doc)
+            logger.info("XML validation success (wp_receiver)")
+            return True
+        except (etree.XMLSyntaxError, etree.DocumentInvalid) as exc:
+            logger.error("XML validation failure (wp_receiver): %s", exc)
+            return False
 
     def consume(self):
         self.channel.basic_qos(prefetch_count=1)

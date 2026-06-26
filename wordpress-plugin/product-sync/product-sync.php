@@ -123,41 +123,46 @@ function integration_product_sync_ensure_schema()
     }
 }
 
-function integration_product_sync_generate_product_central_id()
+function integration_product_sync_build_wp_product_central_id($row_id)
+{
+    // WP- and ODOO- prefixes avoid collisions when both systems create products independently.
+    return sprintf('WP-%06d', (int) $row_id);
+}
+
+function integration_product_sync_assign_wp_product_central_id($row_id)
 {
     global $wpdb;
 
+    $id = (int) $row_id;
+    if ($id <= 0) {
+        return '';
+    }
+
     $table_name = integration_product_sync_table_name();
-    $existing_ids = $wpdb->get_col(
-        $wpdb->prepare(
-            "SELECT product_central_id FROM {$table_name} WHERE product_central_id LIKE %s",
-            'PROD-%'
-        )
+    $existing = $wpdb->get_var(
+        $wpdb->prepare("SELECT product_central_id FROM {$table_name} WHERE id = %d", $id)
     );
 
-    $max_sequence = 0;
-    foreach ((array) $existing_ids as $existing_id) {
-        if (preg_match('/^PROD-(\d+)$/', (string) $existing_id, $matches)) {
-            $max_sequence = max($max_sequence, (int) $matches[1]);
-        }
+    if (is_string($existing) && $existing !== '') {
+        return $existing;
     }
 
-    $next_sequence = $max_sequence + 1;
-    while (true) {
-        $candidate = sprintf('PROD-%06d', $next_sequence);
-        $already_exists = (int) $wpdb->get_var(
-            $wpdb->prepare(
-                "SELECT COUNT(1) FROM {$table_name} WHERE product_central_id = %s",
-                $candidate
-            )
-        );
+    // Concurrency-safe generation for WordPress-origin products:
+    // use the already committed auto_increment row id and a WP- prefix.
+    $product_central_id = integration_product_sync_build_wp_product_central_id($id);
+    $result = $wpdb->update(
+        $table_name,
+        array('product_central_id' => $product_central_id),
+        array('id' => $id),
+        array('%s'),
+        array('%d')
+    );
 
-        if ($already_exists === 0) {
-            return $candidate;
-        }
-
-        $next_sequence++;
+    if ($result === false || $wpdb->last_error !== '') {
+        return '';
     }
+
+    return $product_central_id;
 }
 
 function integration_product_sync_backfill_product_central_ids()
@@ -165,25 +170,12 @@ function integration_product_sync_backfill_product_central_ids()
     global $wpdb;
 
     $table_name = integration_product_sync_table_name();
-    $products_without_product_central_id = $wpdb->get_results(
-        "SELECT id FROM {$table_name} WHERE product_central_id IS NULL OR product_central_id = ''"
+    // Backfill uses row id so generation is deterministic and avoids max(id)+1 races.
+    $wpdb->query(
+        "UPDATE {$table_name} "
+        . "SET product_central_id = CONCAT('WP-', LPAD(id, 6, '0')) "
+        . "WHERE product_central_id IS NULL OR product_central_id = ''"
     );
-
-    if (empty($products_without_product_central_id)) {
-        return;
-    }
-
-    foreach ($products_without_product_central_id as $product) {
-        $product_central_id = integration_product_sync_generate_product_central_id();
-
-        $wpdb->update(
-            $table_name,
-            array('product_central_id' => $product_central_id),
-            array('id' => (int) $product->id),
-            array('%s'),
-            array('%d')
-        );
-    }
 }
 
 function integration_product_sync_send_event_to_wp_sender($action, $product_id, $product_data = array())
@@ -194,6 +186,10 @@ function integration_product_sync_send_event_to_wp_sender($action, $product_id, 
     }
 
     $endpoint = 'http://wp_sender:8000/product-event';
+    $integration_http_token = getenv('INTEGRATION_HTTP_TOKEN');
+    if (!is_string($integration_http_token) || $integration_http_token === '') {
+        $integration_http_token = 'school-project-token';
+    }
 
     $payload = array(
         'action' => $action,
@@ -214,7 +210,10 @@ function integration_product_sync_send_event_to_wp_sender($action, $product_id, 
         $endpoint,
         array(
             'timeout' => 5,
-            'headers' => array('Content-Type' => 'application/json'),
+            'headers' => array(
+                'Content-Type' => 'application/json',
+                'X-Integration-Token' => $integration_http_token,
+            ),
             'body' => wp_json_encode($payload),
         )
     );
@@ -333,6 +332,29 @@ function integration_product_sync_apply_odoo_event($payload)
 
         $wpdb->insert($table_name, $data, $formats);
         if ($wpdb->last_error !== '' || (int) $wpdb->insert_id <= 0) {
+            // Concurrent integration sync with same product_central_id should update existing row.
+            if (stripos((string) $wpdb->last_error, 'Duplicate entry') !== false) {
+                $existing_after_conflict = $wpdb->get_row(
+                    $wpdb->prepare("SELECT * FROM {$table_name} WHERE product_central_id = %s", $product_central_id),
+                    ARRAY_A
+                );
+                if ($existing_after_conflict) {
+                    $result = $wpdb->update(
+                        $table_name,
+                        $data,
+                        array('id' => (int) $existing_after_conflict['id']),
+                        $formats,
+                        array('%d')
+                    );
+                    if ($result === false || $wpdb->last_error !== '') {
+                        return new WP_Error('db_update_failed', 'Duplicate product_central_id detected; failed to update existing integration product', array('status' => 500));
+                    }
+
+                    error_log('product-sync: duplicate integration product_central_id detected, updated existing row product_central_id=' . $product_central_id);
+                    return array('status' => 'updated', 'product_id' => (int) $existing_after_conflict['id']);
+                }
+            }
+
             return new WP_Error('db_insert_failed', 'Failed to create product from Odoo', array('status' => 500));
         }
 
@@ -495,7 +517,6 @@ function integration_product_sync_handle_ajax_action()
     $action = sanitize_text_field(wp_unslash($_POST['integration_action'] ?? ''));
 
     if ($action === 'create') {
-        $product_central_id = integration_product_sync_generate_product_central_id();
         $name = sanitize_text_field(wp_unslash($_POST['name'] ?? ''));
         $price = (float) sanitize_text_field(wp_unslash($_POST['price'] ?? '0'));
         $quantity = (int) sanitize_text_field(wp_unslash($_POST['quantity'] ?? '0'));
@@ -507,7 +528,6 @@ function integration_product_sync_handle_ajax_action()
         $wpdb->insert(
             $table_name,
             array(
-                'product_central_id' => $product_central_id,
                 'name' => $name,
                 'price' => $price,
                 'quantity' => $quantity,
@@ -516,7 +536,7 @@ function integration_product_sync_handle_ajax_action()
                 'active' => $active,
                 'sync_status' => $sync_status,
             ),
-            array('%s', '%s', '%f', '%d', '%s', '%d', '%d', '%s')
+            array('%s', '%f', '%d', '%s', '%d', '%d', '%s')
         );
 
         if ($wpdb->last_error !== '') {
@@ -526,6 +546,11 @@ function integration_product_sync_handle_ajax_action()
         $product_id = (int) $wpdb->insert_id;
         if ($product_id <= 0) {
             integration_product_sync_ajax_response(false, 'Create failed.');
+        }
+
+        $product_central_id = integration_product_sync_assign_wp_product_central_id($product_id);
+        if ($product_central_id === '') {
+            integration_product_sync_ajax_response(false, 'Create failed. Could not assign concurrency-safe WP product_central_id.');
         }
 
         $event_payload = array(
@@ -585,7 +610,10 @@ function integration_product_sync_handle_ajax_action()
             ? (string) $existing_product['product_central_id']
             : '';
         if ($product_central_id === '') {
-            $product_central_id = integration_product_sync_generate_product_central_id();
+            $product_central_id = integration_product_sync_assign_wp_product_central_id($id);
+            if ($product_central_id === '') {
+                integration_product_sync_ajax_response(false, 'Update failed. Could not assign concurrency-safe WP product_central_id.');
+            }
         }
 
         $name = sanitize_text_field(wp_unslash($_POST['name'] ?? ''));
@@ -614,6 +642,9 @@ function integration_product_sync_handle_ajax_action()
         );
 
         if ($result === false || $wpdb->last_error !== '') {
+            if (stripos((string) $wpdb->last_error, 'Duplicate entry') !== false) {
+                integration_product_sync_ajax_response(false, 'Update failed. Duplicate product_central_id detected.');
+            }
             integration_product_sync_ajax_response(false, 'Update failed.');
         }
 
@@ -770,7 +801,6 @@ function integration_product_sync_handle_actions()
     $action = sanitize_text_field(wp_unslash($_POST['integration_action']));
 
     if ($action === 'create') {
-        $product_central_id = integration_product_sync_generate_product_central_id();
         $name = sanitize_text_field(wp_unslash($_POST['name'] ?? ''));
         $price = (float) sanitize_text_field(wp_unslash($_POST['price'] ?? '0'));
         $quantity = (int) sanitize_text_field(wp_unslash($_POST['quantity'] ?? '0'));
@@ -782,7 +812,6 @@ function integration_product_sync_handle_actions()
         $wpdb->insert(
             $table_name,
             array(
-                'product_central_id' => $product_central_id,
                 'name' => $name,
                 'price' => $price,
                 'quantity' => $quantity,
@@ -791,7 +820,7 @@ function integration_product_sync_handle_actions()
                 'active' => $active,
                 'sync_status' => $sync_status,
             ),
-            array('%s', '%s', '%f', '%d', '%s', '%d', '%d', '%s')
+            array('%s', '%f', '%d', '%s', '%d', '%d', '%s')
         );
 
         if ($wpdb->last_error !== '') {
@@ -801,6 +830,11 @@ function integration_product_sync_handle_actions()
         $product_id = (int) $wpdb->insert_id;
         if ($product_id <= 0) {
             integration_product_sync_redirect_with_message('Create failed.');
+        }
+
+        $product_central_id = integration_product_sync_assign_wp_product_central_id($product_id);
+        if ($product_central_id === '') {
+            integration_product_sync_redirect_with_message('Create failed. Could not assign concurrency-safe WP product_central_id.');
         }
 
         $event_payload = array(
@@ -868,7 +902,10 @@ function integration_product_sync_handle_actions()
             ? (string) $existing_product['product_central_id']
             : '';
         if ($product_central_id === '') {
-            $product_central_id = integration_product_sync_generate_product_central_id();
+            $product_central_id = integration_product_sync_assign_wp_product_central_id($id);
+            if ($product_central_id === '') {
+                integration_product_sync_redirect_with_message('Update failed. Could not assign concurrency-safe WP product_central_id.');
+            }
         }
 
         $name = sanitize_text_field(wp_unslash($_POST['name'] ?? ''));
@@ -897,6 +934,9 @@ function integration_product_sync_handle_actions()
         );
 
         if ($result === false || $wpdb->last_error !== '') {
+            if (stripos((string) $wpdb->last_error, 'Duplicate entry') !== false) {
+                integration_product_sync_redirect_with_message('Update failed. Duplicate product_central_id detected.');
+            }
             integration_product_sync_redirect_with_message('Update failed.');
         }
 

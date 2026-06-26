@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
-    <data noupdate="1">
+    <data noupdate="0">
         <record id="seq_product_central_id" model="ir.sequence">
             <field name="name">Product Central ID</field>
             <field name="code">product.central.id</field>
-            <field name="prefix">PROD-</field>
+            <field name="prefix">ODOO-</field>
             <field name="padding">6</field>
             <field name="number_next">1</field>
             <field name="number_increment">1</field>

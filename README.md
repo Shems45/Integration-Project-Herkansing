@@ -90,7 +90,7 @@ Canonical XML example:
 	<source>wordpress</source>
 	<action>created</action>
 	<product>
-		<productCentralId>PROD-000001</productCentralId>
+		<productCentralId>WP-000001</productCentralId>
 		<name>Example product</name>
 		<price currency="EUR">12.00</price>
 		<quantity>5.00</quantity>
@@ -106,6 +106,12 @@ Identifier rule:
 - The only sync identifier is `product_central_id`.
 - In XML this is always `<productCentralId>...</productCentralId>`.
 - Local system IDs (WordPress ID, Odoo ID) are not used as sync identifiers in XML.
+
+ID generation rule:
+
+- Odoo-created products use `ODOO-000001` style IDs generated with `ir.sequence` (`product.central.id`), which is safe for concurrent creation.
+- WordPress-created products use `WP-000001` style IDs generated from the inserted row `id` plus a unique DB constraint.
+- Prefixes `ODOO-` and `WP-` avoid collisions between products created in different systems.
 
 ## WordPress Receiver Flow
 
@@ -134,3 +140,27 @@ Main ports:
 - Odoo: `8069`
 - RabbitMQ AMQP: `5672`
 - RabbitMQ Management UI: `15672`
+
+## XML Validation And Message Security
+
+This project now adds a simple security layer while keeping the same architecture:
+
+- Sender services (`wp_sender`, `odoo_sender`) generate canonical XML and validate it against `schemas/product_event.xsd`.
+- If XML validation fails in a sender, the event is not published and the endpoint returns HTTP 400.
+- Senders sign the exact XML bytes using HMAC SHA256 with `INTEGRATION_SECRET`.
+- RabbitMQ messages include headers:
+	- `x-signature`
+	- `x-source`
+	- `x-message-type=productEvent`
+- Receiver services (`wp_receiver`, `odoo_receiver`) verify HMAC signature first, then validate XML against the XSD.
+- Invalid or unsigned messages are not processed and are rejected without requeue.
+- Sender HTTP endpoints are protected with `X-Integration-Token`, validated against `INTEGRATION_HTTP_TOKEN`.
+
+Environment variables used:
+
+- `INTEGRATION_SECRET=change-me-school-secret`
+- `INTEGRATION_HTTP_TOKEN=school-project-token`
+
+Sync identifier rule remains unchanged:
+
+- `product_central_id` is still the only shared sync identifier between systems.

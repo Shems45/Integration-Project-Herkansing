@@ -1,11 +1,14 @@
 import logging
 import os
 import time
+import hmac
+import hashlib
 import xml.etree.ElementTree as ET
 from typing import Dict, Optional
 
 import pika
 import xmlrpc.client
+from lxml import etree
 
 # Configure logging
 logging.basicConfig(
@@ -25,6 +28,14 @@ ODOO_URL = os.getenv("ODOO_URL", "http://odoo:8069")
 ODOO_DB = os.getenv("ODOO_DB", "odoo")
 ODOO_USERNAME = os.getenv("ODOO_USERNAME", "admin")
 ODOO_PASSWORD = os.getenv("ODOO_PASSWORD", "admin")
+INTEGRATION_SECRET = os.getenv("INTEGRATION_SECRET", "change-me-school-secret")
+XSD_PATH = os.getenv("PRODUCT_EVENT_XSD_PATH", "/app/schemas/product_event.xsd")
+
+
+def load_xml_schema():
+    with open(XSD_PATH, "rb") as schema_file:
+        schema_doc = etree.parse(schema_file)
+    return etree.XMLSchema(schema_doc)
 
 
 class OdooReceiver:
@@ -37,6 +48,7 @@ class OdooReceiver:
         self.odoo_client = None
         self._product_central_id_field_supported = None
         self._product_template_fields = None
+        self.xml_schema = load_xml_schema()
 
     def supports_product_central_id_field(self) -> bool:
         """Check whether product.template.product_central_id is available in Odoo."""
@@ -489,6 +501,14 @@ class OdooReceiver:
                 f"(routing_key: {method.routing_key})"
             )
 
+            if not self.verify_signature(properties, body):
+                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+                return
+
+            if not self.validate_xml_message(body):
+                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+                return
+
             # Parse the XML message
             product = self.parse_product_event_xml(body)
 
@@ -536,6 +556,60 @@ class OdooReceiver:
             logger.error(f"✗ Error handling message: {e}")
             # Requeue the message on error
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+
+    def _header_value(self, headers, key: str) -> str:
+        if not isinstance(headers, dict):
+            return ""
+
+        value = headers.get(key)
+        if value is None:
+            value = headers.get(key.encode("utf-8"))
+
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="ignore")
+
+        return "" if value is None else str(value)
+
+    def verify_signature(self, properties, body: bytes) -> bool:
+        headers = getattr(properties, "headers", None) or {}
+        provided_signature = self._header_value(headers, "x-signature").strip()
+        source = self._header_value(headers, "x-source").strip().lower()
+        message_type = self._header_value(headers, "x-message-type").strip()
+
+        if not provided_signature:
+            logger.error("Security error: missing x-signature header")
+            return False
+
+        if message_type != "productEvent":
+            logger.error("Security error: invalid x-message-type header: %s", message_type)
+            return False
+
+        if source not in {"wordpress", "odoo"}:
+            logger.error("Security error: invalid x-source header: %s", source)
+            return False
+
+        expected_signature = hmac.new(
+            INTEGRATION_SECRET.encode("utf-8"),
+            body,
+            hashlib.sha256,
+        ).hexdigest()
+
+        if not hmac.compare_digest(provided_signature, expected_signature):
+            logger.error("HMAC signature invalid")
+            return False
+
+        logger.info("HMAC signature verified")
+        return True
+
+    def validate_xml_message(self, xml_data: bytes) -> bool:
+        try:
+            xml_doc = etree.fromstring(xml_data)
+            self.xml_schema.assertValid(xml_doc)
+            logger.info("XML validation success (odoo_receiver)")
+            return True
+        except (etree.XMLSyntaxError, etree.DocumentInvalid) as exc:
+            logger.error("XML validation failure (odoo_receiver): %s", exc)
+            return False
 
     def start_consuming(self):
         """Start consuming messages from the RabbitMQ queue."""

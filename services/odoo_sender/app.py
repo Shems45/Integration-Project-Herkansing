@@ -1,9 +1,12 @@
 import logging
 import os
+import hmac
+import hashlib
 import xml.etree.ElementTree as ET
 
 import pika
 from flask import Flask, jsonify, request
+from lxml import etree
 
 app = Flask(__name__)
 
@@ -19,12 +22,24 @@ RABBITMQ_USER = os.getenv("RABBITMQ_USER", "admin")
 RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD", os.getenv("RABBITMQ_PASS", "admin"))
 RABBITMQ_EXCHANGE = os.getenv("RABBITMQ_EXCHANGE", "product.events")
 RABBITMQ_QUEUE = os.getenv("RABBITMQ_QUEUE", "wordpress.product.events")
+INTEGRATION_SECRET = os.getenv("INTEGRATION_SECRET", "change-me-school-secret")
+INTEGRATION_HTTP_TOKEN = os.getenv("INTEGRATION_HTTP_TOKEN", "school-project-token")
+XSD_PATH = os.getenv("PRODUCT_EVENT_XSD_PATH", "/app/schemas/product_event.xsd")
 
 ROUTING_KEYS = {
     "created": "odoo.product.created",
     "updated": "odoo.product.updated",
     "deleted": "odoo.product.deleted",
 }
+
+
+def load_xml_schema():
+    with open(XSD_PATH, "rb") as schema_file:
+        schema_doc = etree.parse(schema_file)
+    return etree.XMLSchema(schema_doc)
+
+
+XML_SCHEMA = load_xml_schema()
 
 
 def as_bool(value):
@@ -68,6 +83,27 @@ def product_event_to_xml(payload):
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
+def validate_xml_message(xml_message):
+    try:
+        xml_doc = etree.fromstring(xml_message)
+        XML_SCHEMA.assertValid(xml_doc)
+        logger.info("XML validation success (odoo_sender)")
+        return True, ""
+    except (etree.XMLSyntaxError, etree.DocumentInvalid) as exc:
+        logger.error("XML validation failure (odoo_sender): %s", exc)
+        return False, str(exc)
+
+
+def create_signature(xml_message):
+    signature = hmac.new(
+        INTEGRATION_SECRET.encode("utf-8"),
+        xml_message,
+        hashlib.sha256,
+    ).hexdigest()
+    logger.info("HMAC signature created (odoo_sender)")
+    return signature
+
+
 def publish_event(action, xml_message):
     credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)
     parameters = pika.ConnectionParameters(
@@ -96,6 +132,8 @@ def publish_event(action, xml_message):
             routing_key=key,
         )
 
+    signature = create_signature(xml_message)
+
     channel.basic_publish(
         exchange=RABBITMQ_EXCHANGE,
         routing_key=routing_key,
@@ -103,14 +141,30 @@ def publish_event(action, xml_message):
         properties=pika.BasicProperties(
             content_type="application/xml",
             delivery_mode=2,
+            headers={
+                "x-signature": signature,
+                "x-source": "odoo",
+                "x-message-type": "productEvent",
+            },
         ),
     )
+
+    logger.info("Published message with signature headers (odoo_sender)")
 
     connection.close()
 
 
 @app.post("/odoo-product-event")
 def odoo_product_event():
+    provided_token = request.headers.get("X-Integration-Token", "")
+    if not provided_token:
+        logger.error("Missing token on /odoo-product-event")
+        return jsonify({"error": "Missing integration token"}), 403
+
+    if not hmac.compare_digest(provided_token, INTEGRATION_HTTP_TOKEN):
+        logger.error("Invalid token on /odoo-product-event")
+        return jsonify({"error": "Invalid integration token"}), 403
+
     data = request.get_json(silent=True) or {}
 
     action = str(data.get("action", "")).strip().lower()
@@ -140,6 +194,9 @@ def odoo_product_event():
         )
         xml_message = product_event_to_xml(payload)
         logger.info("Generated XML for product_central_id=%s", product_central_id)
+        is_valid, validation_error = validate_xml_message(xml_message)
+        if not is_valid:
+            return jsonify({"error": "XML validation failed", "details": validation_error}), 400
         publish_event(action, xml_message)
         logger.info(
             "Published RabbitMQ message: exchange=%s routing_key=%s queue=%s",

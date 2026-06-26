@@ -59,6 +59,7 @@ services:
       HOST: odoo-db
       USER: odoo
       PASSWORD: odoo
+      INTEGRATION_HTTP_TOKEN: school-project-token
     ports:
       - "8069:8069"
     # /usr/lib/python3/dist-packages/odoo/addons = default Odoo addons,
@@ -106,6 +107,7 @@ services:
       WORDPRESS_DB_PASSWORD: wordpress
       WORDPRESS_DB_NAME: wordpress
       WORDPRESS_SYNC_TOKEN: school-project-token
+      INTEGRATION_HTTP_TOKEN: school-project-token
     ports:
       - "8080:80"
     volumes:
@@ -149,6 +151,10 @@ services:
       RABBITMQ_PASS: admin
       RABBITMQ_EXCHANGE: product.events
       RABBITMQ_QUEUE: odoo.product.events
+      INTEGRATION_SECRET: change-me-school-secret
+      INTEGRATION_HTTP_TOKEN: school-project-token
+    volumes:
+      - ./schemas:/app/schemas:ro
     expose:
       - "8000"
     restart: unless-stopped
@@ -170,6 +176,10 @@ services:
       RABBITMQ_PASSWORD: admin
       RABBITMQ_EXCHANGE: product.events
       RABBITMQ_QUEUE: wordpress.product.events
+      INTEGRATION_SECRET: change-me-school-secret
+      INTEGRATION_HTTP_TOKEN: school-project-token
+    volumes:
+      - ./schemas:/app/schemas:ro
     expose:
       - "8000"
     restart: unless-stopped
@@ -193,11 +203,14 @@ services:
       RABBITMQ_USER: admin
       RABBITMQ_PASSWORD: admin
       RABBITMQ_QUEUE: odoo.product.events
+      INTEGRATION_SECRET: change-me-school-secret
       # Odoo connection settings (XML-RPC API)
       ODOO_URL: http://odoo:8069
       ODOO_DB: odoo
       ODOO_USERNAME: admin
       ODOO_PASSWORD: admin
+    volumes:
+      - ./schemas:/app/schemas:ro
     restart: unless-stopped
     networks:
       - project-network
@@ -218,9 +231,12 @@ services:
       RABBITMQ_USER: admin
       RABBITMQ_PASSWORD: admin
       RABBITMQ_QUEUE: wordpress.product.events
+      INTEGRATION_SECRET: change-me-school-secret
       WORDPRESS_URL: http://wordpress
       WORDPRESS_SYNC_ENDPOINT: http://wordpress/?rest_route=/product-sync/v1/odoo-product-event
       WORDPRESS_SYNC_TOKEN: school-project-token
+    volumes:
+      - ./schemas:/app/schemas:ro
     restart: unless-stopped
     networks:
       - project-network
