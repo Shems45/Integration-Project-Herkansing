@@ -31,4 +31,10 @@ Example service URLs:
 
 ## Initial Structure
 
-This repository currently contains the initial folder structure only. The service implementation will be added later.
+This repository contains a simple local Docker Compose setup for Odoo, WordPress, and RabbitMQ.
+
+Run it from the project root with:
+
+```bash
+docker compose up -d
+```
